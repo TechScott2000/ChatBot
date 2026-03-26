@@ -1,6 +1,7 @@
 // api/chat.js
 import { Configuration, OpenAIApi } from "openai";
 import { google } from "googleapis";
+import { DateTime } from "luxon";
 
 const configuration = new Configuration({
   apiKey: process.env.OPENAI_API_KEY,
@@ -11,16 +12,17 @@ const openai = new OpenAIApi(configuration);
 const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_ID,
   process.env.GOOGLE_CLIENT_SECRET,
-  "https://developers.google.com/oauthplayground" // must match redirect URI in OAuth client
+  "https://developers.google.com/oauthplayground"
 );
 oauth2Client.setCredentials({
   refresh_token: process.env.GOOGLE_REFRESH_TOKEN,
 });
 const calendar = google.calendar({ version: "v3", auth: oauth2Client });
 
-// Your calendar ID (use "primary" for the owner's primary calendar)
 const CALENDAR_ID = "primary";
-const TIMEZONE = "America/Chicago";
+const DEFAULT_TIMEZONE = "America/Chicago";
+const WORK_HOURS = { start: 9, end: 17 }; // 9am to 5pm
+const SLOT_INTERVAL = 30; // minutes
 
 const durations = {
   "5min": 5,
@@ -31,11 +33,11 @@ const durations = {
 };
 // =================================
 
-// OpenAI function definition (unchanged)
+// ---- OpenAI function definitions ----
 const functions = [
   {
     name: "submit_support_request",
-    description: "Submit a support request with all required details for scheduling",
+    description: "Submit a support request with all required details (no time yet).",
     parameters: {
       type: "object",
       properties: {
@@ -50,10 +52,29 @@ const functions = [
       },
       required: ["name", "email", "company", "property", "issue_description", "phone_number", "restarted_computer", "session_type"]
     }
+  },
+  {
+    name: "schedule_with_time",
+    description: "Schedule the support session at a specific date and time.",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Customer's full name" },
+        email: { type: "string", description: "Customer's email address" },
+        company: { type: "string", description: "Company name" },
+        property: { type: "string", description: "Property or location name" },
+        issue_description: { type: "string", description: "Detailed description of the issue" },
+        phone_number: { type: "string", description: "Phone number the customer will call from" },
+        restarted_computer: { type: "string", enum: ["Yes", "No"], description: "Whether they have restarted their computer today" },
+        session_type: { type: "string", enum: ["5min", "20min", "40min", "60min", "nosub"], description: "Type of session they want" },
+        datetime: { type: "string", description: "The requested date and time (e.g., 'tomorrow 2pm', 'March 27 at 10am')" }
+      },
+      required: ["name", "email", "company", "property", "issue_description", "phone_number", "restarted_computer", "session_type", "datetime"]
+    }
   }
 ];
 
-// System prompt (unchanged)
+// System prompt – now asks for time after details
 const systemPrompt = {
   role: "system",
   content: `You are a friendly support assistant for Tech Johnny. Your goal is to gather the following information from the customer:
@@ -64,29 +85,113 @@ const systemPrompt = {
 - Detailed description of the issue
 - Phone number they will call from
 - Whether they have restarted their computer today (Yes/No)
-- Which session type they prefer: 5min, 20min, 40min, 60min, or nosub (for clients without subscription)
+- Which session type they prefer: 5min, 20min, 40min, 60min, or nosub
 
-Ask one question at a time, be conversational, and confirm details when needed. Once you have all information, call the submit_support_request function.`
+Ask one question at a time. Once you have all these details, call the submit_support_request function. After that, the customer will tell you their preferred date and time. When they do, call the schedule_with_time function to complete the booking.`
 };
 
+// ---- Helper: parse natural language to DateTime ----
+function parseDateTime(text, referenceZone = DEFAULT_TIMEZONE) {
+  const lower = text.toLowerCase();
+  const now = DateTime.now().setZone(referenceZone);
+  
+  // Try "tomorrow at X:XXpm/am"
+  let match = lower.match(/(tomorrow|today)\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
+  if (match) {
+    let day = match[1] === 'tomorrow' ? now.plus({ days: 1 }) : now;
+    let hour = parseInt(match[2]);
+    let minute = match[3] ? parseInt(match[3]) : 0;
+    let period = match[4];
+    if (period === 'pm' && hour < 12) hour += 12;
+    if (period === 'am' && hour === 12) hour = 0;
+    return day.set({ hour, minute, second: 0 });
+  }
+  
+  // Try "March 27 at 10am" or "2026-03-27 10:00"
+  match = lower.match(/(\w+\s+\d{1,2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
+  if (match) {
+    let dateStr = match[1];
+    let hour = parseInt(match[2]);
+    let minute = match[3] ? parseInt(match[3]) : 0;
+    let period = match[4];
+    if (period === 'pm' && hour < 12) hour += 12;
+    if (period === 'am' && hour === 12) hour = 0;
+    let dt = DateTime.fromFormat(dateStr, 'MMMM d', { zone: referenceZone });
+    if (dt.isValid) return dt.set({ hour, minute, second: 0 });
+  }
+  
+  // Try ISO-like "2026-03-27 10:00"
+  match = lower.match(/(\d{4}-\d{2}-\d{2})\s+(\d{1,2})(?::(\d{2}))?/);
+  if (match) {
+    let datePart = match[1];
+    let hour = parseInt(match[2]);
+    let minute = match[3] ? parseInt(match[3]) : 0;
+    let dt = DateTime.fromISO(datePart, { zone: referenceZone });
+    if (dt.isValid) return dt.set({ hour, minute, second: 0 });
+  }
+  
+  return null;
+}
+
+// ---- Helper: get free slots for a given day ----
+async function getFreeSlots(day, durationMinutes, timezone) {
+  const startOfDay = day.startOf('day');
+  const endOfDay = day.endOf('day');
+  
+  // Generate candidate slots within work hours
+  const slots = [];
+  let cursor = startOfDay.set({ hour: WORK_HOURS.start, minute: 0 });
+  const endWork = startOfDay.set({ hour: WORK_HOURS.end, minute: 0 });
+  while (cursor < endWork) {
+    const slotEnd = cursor.plus({ minutes: durationMinutes });
+    if (slotEnd <= endWork) {
+      slots.push(cursor);
+    }
+    cursor = cursor.plus({ minutes: SLOT_INTERVAL });
+  }
+  
+  if (slots.length === 0) return [];
+  
+  // Query busy times for this day
+  const response = await calendar.freebusy.query({
+    requestBody: {
+      timeMin: startOfDay.toISO(),
+      timeMax: endOfDay.toISO(),
+      items: [{ id: CALENDAR_ID }],
+      timeZone: timezone
+    }
+  });
+  const busy = response.data.calendars[CALENDAR_ID].busy || [];
+  
+  // Filter out busy slots
+  const freeSlots = slots.filter(slot => {
+    const slotStart = slot;
+    const slotEnd = slot.plus({ minutes: durationMinutes });
+    return !busy.some(b => {
+      const busyStart = DateTime.fromISO(b.start);
+      const busyEnd = DateTime.fromISO(b.end);
+      return !(slotEnd <= busyStart || slotStart >= busyEnd);
+    });
+  });
+  
+  return freeSlots;
+}
+
+// ---- Main handler ----
 export default async function handler(req, res) {
-  // CORS headers
   const setCors = (r) => {
     r.setHeader("Access-Control-Allow-Origin", "*");
     r.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
     r.setHeader("Access-Control-Allow-Headers", "Content-Type");
   };
   setCors(res);
-
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
-
-  const { messages } = req.body;
-
+  
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+  
+  const { messages, timezone } = req.body;
+  const userTimezone = timezone || DEFAULT_TIMEZONE;
+  
   try {
     const completion = await openai.createChatCompletion({
       model: "gpt-4o-mini",
@@ -95,52 +200,92 @@ export default async function handler(req, res) {
       function_call: "auto",
       temperature: 0.7,
     });
-
+    
     const responseMessage = completion.data.choices[0].message;
-
+    
     if (responseMessage.function_call) {
-      const functionName = responseMessage.function_call.name;
-      if (functionName === "submit_support_request") {
-        const args = JSON.parse(responseMessage.function_call.arguments);
-
-        // Set default start time: tomorrow at 10:00 AM
-        const startTime = new Date();
-        startTime.setDate(startTime.getDate() + 1);
-        startTime.setHours(10, 0, 0, 0);
-        const endTime = new Date(startTime);
-        const durationMinutes = durations[args.session_type] || 30;
-        endTime.setMinutes(startTime.getMinutes() + durationMinutes);
-
-        const event = {
-          summary: `${args.session_type.toUpperCase()} - ${args.name}`,
-          description: `Company: ${args.company}\nProperty: ${args.property}\nIssue: ${args.issue_description}\nPhone: ${args.phone_number}\nRestarted: ${args.restarted_computer}`,
-          start: { dateTime: startTime.toISOString(), timeZone: TIMEZONE },
-          end: { dateTime: endTime.toISOString(), timeZone: TIMEZONE },
-          attendees: [{ email: args.email }],
-        };
-
-        const response = await calendar.events.insert({
-          calendarId: CALENDAR_ID,
-          resource: event,
-          sendUpdates: "all", // sends email invite to the customer
-        });
-
-        const eventLink = response.data.htmlLink;
-
+      const fn = responseMessage.function_call.name;
+      const args = JSON.parse(responseMessage.function_call.arguments);
+      
+      // Case 1: Details collected, ask for time
+      if (fn === "submit_support_request") {
+        // Store details in the conversation? Not needed; the next user message will include them.
         return res.status(200).json({
-          action: "link",
-          message: `Your session has been scheduled for ${startTime.toLocaleString()} (your local time). Click the link to add it to your calendar:`,
-          url: eventLink
+          action: "reply",
+          message: "Thank you! What date and time would you like to schedule the session? (e.g., 'tomorrow at 2pm', 'March 27 at 10am')"
         });
       }
+      
+      // Case 2: Time provided, try to book
+      if (fn === "schedule_with_time") {
+        const { datetime, ...details } = args;
+        const duration = durations[details.session_type] || 30;
+        
+        // Parse the datetime string
+        let requestedTime = parseDateTime(datetime, userTimezone);
+        if (!requestedTime) {
+          return res.status(200).json({
+            action: "reply",
+            message: "Sorry, I couldn't understand the time. Please use a format like 'tomorrow at 2pm' or 'March 27 at 10:00 AM'."
+          });
+        }
+        
+        // Check availability
+        const freeSlots = await getFreeSlots(requestedTime.startOf('day'), duration, userTimezone);
+        const isFree = freeSlots.some(slot => slot.equals(requestedTime));
+        
+        if (isFree) {
+          // Create the event
+          const startDateTime = requestedTime;
+          const endDateTime = startDateTime.plus({ minutes: duration });
+          const event = {
+            summary: `${details.session_type.toUpperCase()} - ${details.name}`,
+            description: `Company: ${details.company}\nProperty: ${details.property}\nIssue: ${details.issue_description}\nPhone: ${details.phone_number}\nRestarted: ${details.restarted_computer}`,
+            start: { dateTime: startDateTime.toISO(), timeZone: userTimezone },
+            end: { dateTime: endDateTime.toISO(), timeZone: userTimezone },
+            attendees: [{ email: details.email }],
+          };
+          
+          const response = await calendar.events.insert({
+            calendarId: CALENDAR_ID,
+            resource: event,
+            sendUpdates: "all",
+          });
+          
+          const eventLink = response.data.htmlLink;
+          const localTimeString = startDateTime.toLocaleString(DateTime.DATETIME_MED);
+          
+          return res.status(200).json({
+            action: "link",
+            message: `Your session has been scheduled for ${localTimeString}. Click the link to add it to your calendar:`,
+            url: eventLink
+          });
+        } else {
+          // Find alternative free slots on the same day
+          const alternativeSlots = freeSlots.slice(0, 5); // show up to 5 alternatives
+          if (alternativeSlots.length === 0) {
+            return res.status(200).json({
+              action: "reply",
+              message: "Sorry, there are no available slots on that day. Please try a different day."
+            });
+          }
+          const slotList = alternativeSlots.map(slot => 
+            slot.toLocaleString(DateTime.TIME_SIMPLE)
+          ).join(", ");
+          return res.status(200).json({
+            action: "reply",
+            message: `That time is not available. The following times are free on the same day: ${slotList}. Please choose one (e.g., '${alternativeSlots[0].toLocaleString(DateTime.TIME_SIMPLE)}')`
+          });
+        }
+      }
     }
-
-    // If no function call, just reply with text
+    
+    // No function call – just return the AI's text
     return res.status(200).json({
       action: "reply",
       message: responseMessage.content
     });
-
+    
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: "Something went wrong. Please try again later." });
