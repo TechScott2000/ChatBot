@@ -5,6 +5,7 @@
   "main": "api/chat.js",
   "dependencies": {
     "openai": "^3.2.1",
-    "googleapis": "^108.0.0"
+    "googleapis": "^108.0.0",
+    "luxon": "^3.4.4"
   }
 }
