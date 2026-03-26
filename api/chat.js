@@ -1,6 +1,7 @@
-import OpenAI from "openai";
-import { google } from "googleapis";
-import { DateTime } from "luxon";
+// ================= IMPORTS =================
+const OpenAI = require("openai");
+const { google } = require("googleapis");
+const { DateTime } = require("luxon");
 
 // ================= OPENAI =================
 const openai = new OpenAI({
@@ -11,19 +12,22 @@ const openai = new OpenAI({
 const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_ID,
   process.env.GOOGLE_CLIENT_SECRET,
-  process.env.GOOGLE_REDIRECT_URI // ✅ use your own in prod
+  process.env.GOOGLE_REDIRECT_URI // ⚠️ set this in env
 );
 
 oauth2Client.setCredentials({
   refresh_token: process.env.GOOGLE_REFRESH_TOKEN,
 });
 
-const calendar = google.calendar({ version: "v3", auth: oauth2Client });
+const calendar = google.calendar({
+  version: "v3",
+  auth: oauth2Client,
+});
 
 const CALENDAR_ID = "primary";
 const DEFAULT_TIMEZONE = "America/New_York"; // ✅ EST
 
-// ================= SESSION DURATIONS =================
+// ================= SESSION TYPES =================
 const durations = {
   "5min": 5,
   "20min": 20,
@@ -32,7 +36,7 @@ const durations = {
   "nosub": 60,
 };
 
-// ================= FUNCTIONS =================
+// ================= OPENAI TOOLS =================
 const tools = [
   {
     type: "function",
@@ -44,12 +48,12 @@ const tools = [
         properties: {
           session_type: {
             type: "string",
-            enum: ["5min", "20min", "40min", "60min", "nosub"]
-          }
+            enum: ["5min", "20min", "40min", "60min", "nosub"],
+          },
         },
-        required: ["session_type"]
-      }
-    }
+        required: ["session_type"],
+      },
+    },
   },
   {
     type: "function",
@@ -67,79 +71,88 @@ const tools = [
           phone_number: { type: "string" },
           restarted_computer: { type: "string", enum: ["Yes", "No"] },
           session_type: { type: "string" },
-          selected_time: { type: "string", description: "ISO datetime" }
+          selected_time: { type: "string" },
         },
         required: [
-          "name","email","company","property",
-          "issue_description","phone_number",
-          "restarted_computer","session_type","selected_time"
-        ]
-      }
-    }
-  }
+          "name",
+          "email",
+          "company",
+          "property",
+          "issue_description",
+          "phone_number",
+          "restarted_computer",
+          "session_type",
+          "selected_time",
+        ],
+      },
+    },
+  },
 ];
 
 // ================= SYSTEM PROMPT =================
 const systemPrompt = {
   role: "system",
   content: `
-You are a support assistant for Tech Johnny.
+You are a Tech Johnny support assistant.
 
-Flow:
-1. Collect ALL required info.
-2. Ask for session type.
-3. Call get_available_slots.
-4. Show user options.
-5. After user selects time → call book_appointment.
+FLOW:
+1. Collect all required info:
+   - name, email, company, property, issue_description, phone_number, restarted_computer
+2. Ask for session type
+3. Call get_available_slots
+4. Show times to user
+5. When user selects → call book_appointment
 
-Rules:
+RULES:
 - Ask ONE question at a time
 - Be concise
-- When all info is collected → move forward immediately
-`
+- Once info is complete → move forward immediately
+`,
 };
 
-// ================= HELPER: GET FREE SLOTS =================
+// ================= GET AVAILABLE SLOTS =================
 async function getAvailableSlots(sessionType, timezone) {
   const duration = durations[sessionType];
   const now = DateTime.now().setZone(timezone);
 
-  const startOfDay = now.plus({ days: 1 }).startOf("day").set({ hour: 9 });
-  const endOfDay = startOfDay.set({ hour: 17 });
+  const start = now.plus({ days: 1 }).set({ hour: 9, minute: 0 });
+  const end = start.set({ hour: 17 });
 
-  const response = await calendar.freebusy.query({
+  const fb = await calendar.freebusy.query({
     requestBody: {
-      timeMin: startOfDay.toUTC().toISO(),
-      timeMax: endOfDay.toUTC().toISO(),
-      items: [{ id: CALENDAR_ID }]
-    }
+      timeMin: start.toUTC().toISO(),
+      timeMax: end.toUTC().toISO(),
+      items: [{ id: CALENDAR_ID }],
+    },
   });
 
-  const busy = response.data.calendars[CALENDAR_ID].busy;
+  const busy = fb.data.calendars[CALENDAR_ID].busy;
 
   let slots = [];
-  let current = startOfDay;
+  let current = start;
 
-  while (current.plus({ minutes: duration }) <= endOfDay) {
+  while (current.plus({ minutes: duration }) <= end) {
     const slotEnd = current.plus({ minutes: duration });
 
-    const conflict = busy.some(b =>
-      current < DateTime.fromISO(b.end) &&
-      slotEnd > DateTime.fromISO(b.start)
-    );
+    const conflict = busy.some((b) => {
+      const bStart = DateTime.fromISO(b.start);
+      const bEnd = DateTime.fromISO(b.end);
+      return current < bEnd && slotEnd > bStart;
+    });
 
     if (!conflict) {
       slots.push(current.toISO());
     }
 
-    current = current.plus({ minutes: 30 }); // 30-min intervals
+    current = current.plus({ minutes: 30 });
   }
 
-  return slots.slice(0, 5); // limit options
+  return slots.slice(0, 5);
 }
 
 // ================= HANDLER =================
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
+  // ===== CORS =====
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -161,31 +174,52 @@ export default async function handler(req, res) {
 
     const msg = completion.choices[0].message;
 
-    // ================= TOOL CALL =================
+    // ===== TOOL CALL HANDLING =====
     if (msg.tool_calls) {
       const toolCall = msg.tool_calls[0];
-      const name = toolCall.function.name;
-      const args = JSON.parse(toolCall.function.arguments);
+      const functionName = toolCall.function.name;
 
-      // ===== GET AVAILABLE SLOTS =====
-      if (name === "get_available_slots") {
-        const slots = await getAvailableSlots(args.session_type, userTimezone);
+      let args;
+      try {
+        args = JSON.parse(toolCall.function.arguments);
+      } catch (err) {
+        return res.json({
+          action: "reply",
+          message: "I had trouble reading that. Can you confirm your details?",
+        });
+      }
 
-        const readable = slots.map(s =>
-          DateTime.fromISO(s).setZone(userTimezone).toLocaleString(DateTime.DATETIME_MED)
+      // ===== GET SLOTS =====
+      if (functionName === "get_available_slots") {
+        const slots = await getAvailableSlots(
+          args.session_type,
+          userTimezone
+        );
+
+        const readable = slots.map((s) =>
+          DateTime.fromISO(s)
+            .setZone(userTimezone)
+            .toLocaleString(DateTime.DATETIME_MED)
         );
 
         return res.json({
           action: "reply",
-          message: `Here are available times:\n\n${readable.join("\n")}\n\nWhich one works for you?`,
-          slots
+          message:
+            "Here are available times:\n\n" +
+            readable.join("\n") +
+            "\n\nWhich one works for you?",
+          slots,
         });
       }
 
-      // ===== BOOK APPOINTMENT =====
-      if (name === "book_appointment") {
-        const start = DateTime.fromISO(args.selected_time).setZone(userTimezone);
-        const end = start.plus({ minutes: durations[args.session_type] });
+      // ===== BOOK =====
+      if (functionName === "book_appointment") {
+        const start = DateTime.fromISO(args.selected_time).setZone(
+          userTimezone
+        );
+        const end = start.plus({
+          minutes: durations[args.session_type],
+        });
 
         const event = {
           summary: `${args.session_type} - ${args.name}`,
@@ -196,9 +230,15 @@ Issue: ${args.issue_description}
 Phone: ${args.phone_number}
 Restarted: ${args.restarted_computer}
           `,
-          start: { dateTime: start.toUTC().toISO(), timeZone: userTimezone },
-          end: { dateTime: end.toUTC().toISO(), timeZone: userTimezone },
-          attendees: [{ email: args.email }]
+          start: {
+            dateTime: start.toUTC().toISO(),
+            timeZone: userTimezone,
+          },
+          end: {
+            dateTime: end.toUTC().toISO(),
+            timeZone: userTimezone,
+          },
+          attendees: [{ email: args.email }],
         };
 
         const response = await calendar.events.insert({
@@ -209,20 +249,23 @@ Restarted: ${args.restarted_computer}
 
         return res.json({
           action: "link",
-          message: `Booked for ${start.toLocaleString(DateTime.DATETIME_MED)}`,
-          url: response.data.htmlLink
+          message:
+            "Booked for " +
+            start.toLocaleString(DateTime.DATETIME_MED),
+          url: response.data.htmlLink,
         });
       }
     }
 
-    // ================= NORMAL CHAT =================
+    // ===== NORMAL RESPONSE =====
     return res.json({
       action: "reply",
-      message: msg.content
+      message: msg.content,
     });
-
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: "Server error" });
+    console.error("ERROR:", err);
+    return res.status(500).json({
+      error: "Something went wrong",
+    });
   }
-}
+};
