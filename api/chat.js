@@ -1,6 +1,7 @@
 // api/chat.js
 import { Configuration, OpenAIApi } from "openai";
 import { google } from "googleapis";
+import { DateTime } from "luxon";
 
 const configuration = new Configuration({
   apiKey: process.env.OPENAI_API_KEY,
@@ -11,16 +12,15 @@ const openai = new OpenAIApi(configuration);
 const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_ID,
   process.env.GOOGLE_CLIENT_SECRET,
-  "https://developers.google.com/oauthplayground" // must match redirect URI in OAuth client
+  "https://developers.google.com/oauthplayground"
 );
 oauth2Client.setCredentials({
   refresh_token: process.env.GOOGLE_REFRESH_TOKEN,
 });
 const calendar = google.calendar({ version: "v3", auth: oauth2Client });
 
-// Your calendar ID (use "primary" for the owner's primary calendar)
 const CALENDAR_ID = "primary";
-const TIMEZONE = "America/Chicago";
+const DEFAULT_TIMEZONE = "America/Chicago";
 
 const durations = {
   "5min": 5,
@@ -31,7 +31,7 @@ const durations = {
 };
 // =================================
 
-// OpenAI function definition (unchanged)
+// OpenAI function definition
 const functions = [
   {
     name: "submit_support_request",
@@ -53,7 +53,7 @@ const functions = [
   }
 ];
 
-// System prompt (unchanged)
+// System prompt
 const systemPrompt = {
   role: "system",
   content: `You are a friendly support assistant for Tech Johnny. Your goal is to gather the following information from the customer:
@@ -85,7 +85,8 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const { messages } = req.body;
+  const { messages, timezone } = req.body;
+  const userTimezone = timezone || DEFAULT_TIMEZONE;
 
   try {
     const completion = await openai.createChatCompletion({
@@ -103,33 +104,41 @@ export default async function handler(req, res) {
       if (functionName === "submit_support_request") {
         const args = JSON.parse(responseMessage.function_call.arguments);
 
-        // Set default start time: tomorrow at 10:00 AM
-        const startTime = new Date();
-        startTime.setDate(startTime.getDate() + 1);
-        startTime.setHours(10, 0, 0, 0);
-        const endTime = new Date(startTime);
+        // Set default start time: tomorrow at 10:00 AM in the user's timezone
+        const startDateTime = DateTime.now()
+          .setZone(userTimezone)
+          .plus({ days: 1 })
+          .set({ hour: 10, minute: 0, second: 0, millisecond: 0 });
+
         const durationMinutes = durations[args.session_type] || 30;
-        endTime.setMinutes(startTime.getMinutes() + durationMinutes);
+        const endDateTime = startDateTime.plus({ minutes: durationMinutes });
+
+        // Convert to UTC ISO strings for Google Calendar
+        const startIso = startDateTime.toUTC().toISO();
+        const endIso = endDateTime.toUTC().toISO();
 
         const event = {
           summary: `${args.session_type.toUpperCase()} - ${args.name}`,
           description: `Company: ${args.company}\nProperty: ${args.property}\nIssue: ${args.issue_description}\nPhone: ${args.phone_number}\nRestarted: ${args.restarted_computer}`,
-          start: { dateTime: startTime.toISOString(), timeZone: TIMEZONE },
-          end: { dateTime: endTime.toISOString(), timeZone: TIMEZONE },
+          start: { dateTime: startIso, timeZone: userTimezone },
+          end: { dateTime: endIso, timeZone: userTimezone },
           attendees: [{ email: args.email }],
         };
 
         const response = await calendar.events.insert({
           calendarId: CALENDAR_ID,
           resource: event,
-          sendUpdates: "all", // sends email invite to the customer
+          sendUpdates: "all",
         });
 
         const eventLink = response.data.htmlLink;
 
+        // Display time in user's local format
+        const localTimeString = startDateTime.toLocaleString(DateTime.DATETIME_MED);
+
         return res.status(200).json({
           action: "link",
-          message: `Your session has been scheduled for ${startTime.toLocaleString()} (your local time). Click the link to add it to your calendar:`,
+          message: `Your session has been scheduled for ${localTimeString} (your local time). Click the link to add it to your calendar:`,
           url: eventLink
         });
       }
