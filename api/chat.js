@@ -32,15 +32,15 @@ const durations = {
   "nosub": 60,
 };
 
-// Simple in‑memory session store
-const pendingDetails = new Map();
+// In‑memory session store
+const pendingDetails = new Map();       // sessionId -> { details, freeSlots?, day? }
 
 // ---- Helper: parse natural language to DateTime ----
 function parseDateTime(text, referenceZone = DEFAULT_TIMEZONE) {
   const lower = text.toLowerCase();
   const now = DateTime.now().setZone(referenceZone);
   
-  // "tomorrow at X:XXpm/am"
+  // Try "tomorrow at X:XXpm/am"
   let match = lower.match(/(tomorrow|today)\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
   if (match) {
     let day = match[1] === 'tomorrow' ? now.plus({ days: 1 }) : now;
@@ -52,7 +52,7 @@ function parseDateTime(text, referenceZone = DEFAULT_TIMEZONE) {
     return day.set({ hour, minute, second: 0 });
   }
   
-  // "March 27 at 10am"
+  // Try "March 27 at 10am"
   match = lower.match(/(\w+\s+\d{1,2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
   if (match) {
     let dateStr = match[1];
@@ -65,7 +65,7 @@ function parseDateTime(text, referenceZone = DEFAULT_TIMEZONE) {
     if (dt.isValid) return dt.set({ hour, minute, second: 0 });
   }
   
-  // "2026-03-27 10:00"
+  // Try ISO-like "2026-03-27 10:00"
   match = lower.match(/(\d{4}-\d{2}-\d{2})\s+(\d{1,2})(?::(\d{2}))?/);
   if (match) {
     let datePart = match[1];
@@ -75,6 +75,22 @@ function parseDateTime(text, referenceZone = DEFAULT_TIMEZONE) {
     if (dt.isValid) return dt.set({ hour, minute, second: 0 });
   }
   
+  return null;
+}
+
+// Parse just a time like "9:00 AM"
+function parseTimeOnly(text, referenceZone = DEFAULT_TIMEZONE) {
+  const lower = text.toLowerCase();
+  const match = lower.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)/);
+  if (match) {
+    let hour = parseInt(match[1]);
+    let minute = match[2] ? parseInt(match[2]) : 0;
+    let period = match[3];
+    if (period === 'pm' && hour < 12) hour += 12;
+    if (period === 'am' && hour === 12) hour = 0;
+    // Return an object with hour, minute (no date)
+    return { hour, minute };
+  }
   return null;
 }
 
@@ -97,7 +113,7 @@ async function getFreeSlots(day, durationMinutes, timezone) {
   
   if (slots.length === 0) return [];
   
-  // Query busy times
+  // Query busy times for this day
   const response = await calendar.freebusy.query({
     requestBody: {
       timeMin: startOfDay.toISO(),
@@ -140,14 +156,106 @@ export default async function handler(req, res) {
   // Simple session ID based on first user message
   const sessionId = messages.length > 0 && messages[0].role === 'user' ? messages[0].content.slice(0, 100) : 'default';
   
-  // Check if we have pending details for this session
+  // Check if we are in the time‑selection phase
   if (pendingDetails.has(sessionId)) {
-    const details = pendingDetails.get(sessionId);
+    const session = pendingDetails.get(sessionId);
     const lastMessage = messages[messages.length - 1];
-    const timeText = lastMessage.content;
+    const userInput = lastMessage.content;
     
-    const duration = durations[details.session_type] || 30;
-    let requestedTime = parseDateTime(timeText, userTimezone);
+    // If we already have freeSlots stored (i.e., we asked for alternatives)
+    if (session.freeSlots) {
+      // Try to parse just the time
+      const timeOnly = parseTimeOnly(userInput);
+      if (timeOnly) {
+        // Find a matching slot by hour/minute
+        const matchedSlot = session.freeSlots.find(slot => 
+          slot.hour === timeOnly.hour && slot.minute === timeOnly.minute
+        );
+        if (matchedSlot) {
+          // Use the matched slot (which already has the correct day)
+          const startDateTime = matchedSlot;
+          const duration = durations[session.details.session_type] || 30;
+          const endDateTime = startDateTime.plus({ minutes: duration });
+          
+          const event = {
+            summary: `${session.details.session_type.toUpperCase()} - ${session.details.name}`,
+            description: `Company: ${session.details.company}\nProperty: ${session.details.property}\nIssue: ${session.details.issue_description}\nPhone: ${session.details.phone_number}\nRestarted: ${session.details.restarted_computer}`,
+            start: { dateTime: startDateTime.toISO(), timeZone: userTimezone },
+            end: { dateTime: endDateTime.toISO(), timeZone: userTimezone },
+            attendees: [{ email: session.details.email }],
+          };
+          
+          const response = await calendar.events.insert({
+            calendarId: CALENDAR_ID,
+            resource: event,
+            sendUpdates: "all",
+          });
+          
+          const eventLink = response.data.htmlLink;
+          const localTimeString = startDateTime.toLocaleString(DateTime.DATETIME_MED);
+          
+          pendingDetails.delete(sessionId);
+          return res.status(200).json({
+            action: "link",
+            message: `Your session has been scheduled for ${localTimeString}. Click the link to add it to your calendar:`,
+            url: eventLink
+          });
+        }
+      }
+      
+      // If no match, maybe the user entered a full phrase like "tomorrow at 9:00 AM"
+      let parsed = parseDateTime(userInput, userTimezone);
+      if (parsed && parsed.startOf('day').equals(session.day.startOf('day'))) {
+        // Check if that specific time is in freeSlots
+        const matched = session.freeSlots.some(slot => slot.equals(parsed));
+        if (matched) {
+          // same day, proceed to book
+          const startDateTime = parsed;
+          const duration = durations[session.details.session_type] || 30;
+          const endDateTime = startDateTime.plus({ minutes: duration });
+          
+          const event = {
+            summary: `${session.details.session_type.toUpperCase()} - ${session.details.name}`,
+            description: `Company: ${session.details.company}\nProperty: ${session.details.property}\nIssue: ${session.details.issue_description}\nPhone: ${session.details.phone_number}\nRestarted: ${session.details.restarted_computer}`,
+            start: { dateTime: startDateTime.toISO(), timeZone: userTimezone },
+            end: { dateTime: endDateTime.toISO(), timeZone: userTimezone },
+            attendees: [{ email: session.details.email }],
+          };
+          
+          const response = await calendar.events.insert({
+            calendarId: CALENDAR_ID,
+            resource: event,
+            sendUpdates: "all",
+          });
+          
+          const eventLink = response.data.htmlLink;
+          const localTimeString = startDateTime.toLocaleString(DateTime.DATETIME_MED);
+          
+          pendingDetails.delete(sessionId);
+          return res.status(200).json({
+            action: "link",
+            message: `Your session has been scheduled for ${localTimeString}. Click the link to add it to your calendar:`,
+            url: eventLink
+          });
+        }
+      }
+      
+      // Still not matched – repeat the list
+      const slotList = session.freeSlots.map(slot => 
+        slot.toLocaleString(DateTime.TIME_SIMPLE)
+      ).join(", ");
+      return res.status(200).json({
+        action: "reply",
+        message: `I didn't recognize that time. Please choose one of the available times: ${slotList}. (e.g., '9:00 AM')`
+      });
+    }
+    
+    // We have details but not freeSlots yet (first time asking for time)
+    const details = session.details;
+    const userInput = lastMessage.content;
+    
+    // Parse the user's time request
+    let requestedTime = parseDateTime(userInput, userTimezone);
     if (!requestedTime) {
       return res.status(200).json({
         action: "reply",
@@ -155,12 +263,12 @@ export default async function handler(req, res) {
       });
     }
     
-    // Check availability
+    const duration = durations[details.session_type] || 30;
     const freeSlots = await getFreeSlots(requestedTime.startOf('day'), duration, userTimezone);
     const isFree = freeSlots.some(slot => slot.equals(requestedTime));
     
     if (isFree) {
-      // Create event
+      // Create event directly
       const startDateTime = requestedTime;
       const endDateTime = startDateTime.plus({ minutes: duration });
       const event = {
@@ -187,6 +295,7 @@ export default async function handler(req, res) {
         url: eventLink
       });
     } else {
+      // No free slot – store the freeSlots for this day and ask for alternatives
       const alternativeSlots = freeSlots.slice(0, 5);
       if (alternativeSlots.length === 0) {
         pendingDetails.delete(sessionId);
@@ -195,12 +304,18 @@ export default async function handler(req, res) {
           message: "Sorry, there are no available slots on that day. Please try a different day."
         });
       }
+      // Store the freeSlots and the day for later matching
+      pendingDetails.set(sessionId, {
+        details: details,
+        freeSlots: alternativeSlots,
+        day: requestedTime.startOf('day')
+      });
       const slotList = alternativeSlots.map(slot => 
         slot.toLocaleString(DateTime.TIME_SIMPLE)
       ).join(", ");
       return res.status(200).json({
         action: "reply",
-        message: `That time is not available. The following times are free on the same day: ${slotList}. Please choose one (e.g., '${alternativeSlots[0].toLocaleString(DateTime.TIME_SIMPLE)}')`
+        message: `That time is not available. The following times are free on that day: ${slotList}. Please choose one (e.g., '${alternativeSlots[0].toLocaleString(DateTime.TIME_SIMPLE)}')`
       });
     }
   }
@@ -255,7 +370,7 @@ Ask one question at a time. Once you have all these details, call the submit_sup
     
     if (responseMessage.function_call && responseMessage.function_call.name === "submit_support_request") {
       const args = JSON.parse(responseMessage.function_call.arguments);
-      pendingDetails.set(sessionId, args);
+      pendingDetails.set(sessionId, { details: args });
       return res.status(200).json({
         action: "reply",
         message: "Thank you! Could you please let me know the date and time you would like to schedule the session? For example, 'tomorrow at 2pm' or 'March 27 at 10am.'"
