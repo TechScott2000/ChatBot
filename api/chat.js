@@ -1,36 +1,65 @@
 // api/chat.js
 import { Configuration, OpenAIApi } from "openai";
+import { google } from "googleapis";
 
 const configuration = new Configuration({
   apiKey: process.env.OPENAI_API_KEY,
 });
 const openai = new OpenAIApi(configuration);
 
-// Helper to set CORS headers
-function setCorsHeaders(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*"); // or your Squarespace domain
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+// ===== Google Calendar Setup =====
+const serviceAccountJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+if (!serviceAccountJson) {
+  throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON env variable");
 }
+const auth = new google.auth.GoogleAuth({
+  credentials: JSON.parse(serviceAccountJson),
+  scopes: ["https://www.googleapis.com/auth/calendar"],
+});
+const calendar = google.calendar({ version: "v3", auth });
 
-export default async function handler(req, res) {
-  // Handle preflight
-  if (req.method === "OPTIONS") {
-    setCorsHeaders(res);
-    return res.status(200).end();
+// Your calendar ID (use "primary" for default calendar, or your specific calendar ID)
+const CALENDAR_ID = "primary";
+
+// Default timezone for events (adjust to your business timezone)
+const TIMEZONE = "America/Chicago";
+
+// Duration mapping for session types (in minutes)
+const durations = {
+  "5min": 5,
+  "20min": 20,
+  "40min": 40,
+  "60min": 60,
+  "nosub": 60,
+};
+// =================================
+
+// OpenAI function definition (unchanged)
+const functions = [
+  {
+    name: "submit_support_request",
+    description: "Submit a support request with all required details for scheduling",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Customer's full name" },
+        email: { type: "string", description: "Customer's email address" },
+        company: { type: "string", description: "Company name" },
+        property: { type: "string", description: "Property or location name" },
+        issue_description: { type: "string", description: "Detailed description of the issue" },
+        phone_number: { type: "string", description: "Phone number the customer will call from" },
+        restarted_computer: { type: "string", enum: ["Yes", "No"], description: "Whether they have restarted their computer today" },
+        session_type: { type: "string", enum: ["5min", "20min", "40min", "60min", "nosub"], description: "Type of session they want" }
+      },
+      required: ["name", "email", "company", "property", "issue_description", "phone_number", "restarted_computer", "session_type"]
+    }
   }
+];
 
-  // Only POST allowed
-  if (req.method !== "POST") {
-    setCorsHeaders(res);
-    return res.status(405).json({ error: "Method not allowed" });
-  }
-
-  const { messages } = req.body;
-
-  const systemPrompt = {
-    role: "system",
-    content: `You are a friendly support assistant for Tech Johnny. Your goal is to gather the following information from the customer:
+// System prompt (unchanged)
+const systemPrompt = {
+  role: "system",
+  content: `You are a friendly support assistant for Tech Johnny. Your goal is to gather the following information from the customer:
 - Name
 - Email
 - Company Name
@@ -40,22 +69,83 @@ export default async function handler(req, res) {
 - Whether they have restarted their computer today (Yes/No)
 - Which session type they prefer: 5min, 20min, 40min, 60min, or nosub (for clients without subscription)
 
-Ask one question at a time, be conversational, and confirm details when needed.`
+Ask one question at a time, be conversational, and confirm details when needed. Once you have all information, call the submit_support_request function.`
+};
+
+export default async function handler(req, res) {
+  // CORS headers
+  const setCors = (r) => {
+    r.setHeader("Access-Control-Allow-Origin", "*");
+    r.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    r.setHeader("Access-Control-Allow-Headers", "Content-Type");
   };
+  setCors(res);
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  const { messages } = req.body;
 
   try {
     const completion = await openai.createChatCompletion({
       model: "gpt-4o-mini",
       messages: [systemPrompt, ...messages],
+      functions: functions,
+      function_call: "auto",
       temperature: 0.7,
     });
 
-    const reply = completion.data.choices[0].message.content;
-    setCorsHeaders(res);
-    return res.status(200).json({ action: "reply", message: reply });
+    const responseMessage = completion.data.choices[0].message;
+
+    if (responseMessage.function_call) {
+      const functionName = responseMessage.function_call.name;
+      if (functionName === "submit_support_request") {
+        const args = JSON.parse(responseMessage.function_call.arguments);
+
+        // Set default start time: tomorrow at 10:00 AM
+        const startTime = new Date();
+        startTime.setDate(startTime.getDate() + 1);
+        startTime.setHours(10, 0, 0, 0);
+        const endTime = new Date(startTime);
+        const durationMinutes = durations[args.session_type] || 30;
+        endTime.setMinutes(startTime.getMinutes() + durationMinutes);
+
+        const event = {
+          summary: `${args.session_type.toUpperCase()} - ${args.name}`,
+          description: `Company: ${args.company}\nProperty: ${args.property}\nIssue: ${args.issue_description}\nPhone: ${args.phone_number}\nRestarted: ${args.restarted_computer}`,
+          start: { dateTime: startTime.toISOString(), timeZone: TIMEZONE },
+          end: { dateTime: endTime.toISOString(), timeZone: TIMEZONE },
+          attendees: [{ email: args.email }],
+        };
+
+        const response = await calendar.events.insert({
+          calendarId: CALENDAR_ID,
+          resource: event,
+          sendUpdates: "all", // sends email invite to the customer
+        });
+
+        const eventLink = response.data.htmlLink;
+
+        return res.status(200).json({
+          action: "link",
+          message: `Your session has been scheduled for ${startTime.toLocaleString()} (your local time). Click the link to add it to your calendar:`,
+          url: eventLink
+        });
+      }
+    }
+
+    // If no function call, just reply with text
+    return res.status(200).json({
+      action: "reply",
+      message: responseMessage.content
+    });
+
   } catch (error) {
     console.error(error);
-    setCorsHeaders(res);
     return res.status(500).json({ error: "Something went wrong. Please try again later." });
   }
 }
