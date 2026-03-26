@@ -7,24 +7,21 @@ const configuration = new Configuration({
 });
 const openai = new OpenAIApi(configuration);
 
-// ===== Google Calendar Setup =====
-const serviceAccountJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-if (!serviceAccountJson) {
-  throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON env variable");
-}
-const auth = new google.auth.GoogleAuth({
-  credentials: JSON.parse(serviceAccountJson),
-  scopes: ["https://www.googleapis.com/auth/calendar"],
+// ===== Google Calendar OAuth Setup =====
+const oauth2Client = new google.auth.OAuth2(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  "https://developers.google.com/oauthplayground" // must match redirect URI in OAuth client
+);
+oauth2Client.setCredentials({
+  refresh_token: process.env.GOOGLE_REFRESH_TOKEN,
 });
-const calendar = google.calendar({ version: "v3", auth });
+const calendar = google.calendar({ version: "v3", auth: oauth2Client });
 
-// Your calendar ID (use "primary" for default calendar, or your specific calendar ID)
+// Your calendar ID (use "primary" for the owner's primary calendar)
 const CALENDAR_ID = "primary";
-
-// Default timezone for events (adjust to your business timezone)
 const TIMEZONE = "America/Chicago";
 
-// Duration mapping for session types (in minutes)
 const durations = {
   "5min": 5,
   "20min": 20,
