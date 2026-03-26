@@ -21,8 +21,8 @@ const calendar = google.calendar({ version: "v3", auth: oauth2Client });
 
 const CALENDAR_ID = "primary";
 const DEFAULT_TIMEZONE = "America/Chicago";
-const WORK_HOURS = { start: 9, end: 17 }; // 9am to 5pm
-const SLOT_INTERVAL = 30; // minutes
+const WORK_HOURS = { start: 9, end: 17 };
+const SLOT_INTERVAL = 30;
 
 const durations = {
   "5min": 5,
@@ -33,29 +33,11 @@ const durations = {
 };
 // =================================
 
-// ---- OpenAI function definitions ----
+// ---- OpenAI function definition (now includes datetime) ----
 const functions = [
   {
     name: "submit_support_request",
-    description: "Submit a support request with all required details (no time yet).",
-    parameters: {
-      type: "object",
-      properties: {
-        name: { type: "string", description: "Customer's full name" },
-        email: { type: "string", description: "Customer's email address" },
-        company: { type: "string", description: "Company name" },
-        property: { type: "string", description: "Property or location name" },
-        issue_description: { type: "string", description: "Detailed description of the issue" },
-        phone_number: { type: "string", description: "Phone number the customer will call from" },
-        restarted_computer: { type: "string", enum: ["Yes", "No"], description: "Whether they have restarted their computer today" },
-        session_type: { type: "string", enum: ["5min", "20min", "40min", "60min", "nosub"], description: "Type of session they want" }
-      },
-      required: ["name", "email", "company", "property", "issue_description", "phone_number", "restarted_computer", "session_type"]
-    }
-  },
-  {
-    name: "schedule_with_time",
-    description: "Schedule the support session at a specific date and time.",
+    description: "Submit a support request with all required details, including the requested date/time.",
     parameters: {
       type: "object",
       properties: {
@@ -67,17 +49,17 @@ const functions = [
         phone_number: { type: "string", description: "Phone number the customer will call from" },
         restarted_computer: { type: "string", enum: ["Yes", "No"], description: "Whether they have restarted their computer today" },
         session_type: { type: "string", enum: ["5min", "20min", "40min", "60min", "nosub"], description: "Type of session they want" },
-        datetime: { type: "string", description: "The requested date and time (e.g., 'tomorrow 2pm', 'March 27 at 10am')" }
+        datetime: { type: "string", description: "The requested date and time (e.g., 'tomorrow at 2pm', 'March 27 at 10am')" }
       },
       required: ["name", "email", "company", "property", "issue_description", "phone_number", "restarted_computer", "session_type", "datetime"]
     }
   }
 ];
 
-// System prompt – now asks for time after details
+// System prompt – now asks for time as one of the details
 const systemPrompt = {
   role: "system",
-  content: `You are a friendly support assistant for Tech Johnny. Your goal is to gather the following information from the customer:
+  content: `You are a friendly support assistant for Tech Johnny. Gather the following information from the customer:
 - Name
 - Email
 - Company Name
@@ -86,8 +68,9 @@ const systemPrompt = {
 - Phone number they will call from
 - Whether they have restarted their computer today (Yes/No)
 - Which session type they prefer: 5min, 20min, 40min, 60min, or nosub
+- The date and time they would like to schedule the session (e.g., "tomorrow at 2pm", "March 27 at 10am")
 
-Ask one question at a time. Once you have all these details, call the submit_support_request function. After that, the customer will tell you their preferred date and time. When they do, call the schedule_with_time function to complete the booking.`
+Ask one question at a time. Once you have all details, call the submit_support_request function with all the information.`
 };
 
 // ---- Helper: parse natural language to DateTime ----
@@ -107,7 +90,7 @@ function parseDateTime(text, referenceZone = DEFAULT_TIMEZONE) {
     return day.set({ hour, minute, second: 0 });
   }
   
-  // Try "March 27 at 10am" or "2026-03-27 10:00"
+  // Try "March 27 at 10am"
   match = lower.match(/(\w+\s+\d{1,2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
   if (match) {
     let dateStr = match[1];
@@ -203,80 +186,65 @@ export default async function handler(req, res) {
     
     const responseMessage = completion.data.choices[0].message;
     
-    if (responseMessage.function_call) {
-      const fn = responseMessage.function_call.name;
+    if (responseMessage.function_call && responseMessage.function_call.name === "submit_support_request") {
       const args = JSON.parse(responseMessage.function_call.arguments);
+      const duration = durations[args.session_type] || 30;
       
-      // Case 1: Details collected, ask for time
-      if (fn === "submit_support_request") {
-        // Store details in the conversation? Not needed; the next user message will include them.
+      // Parse the datetime string
+      let requestedTime = parseDateTime(args.datetime, userTimezone);
+      if (!requestedTime) {
         return res.status(200).json({
           action: "reply",
-          message: "Thank you! What date and time would you like to schedule the session? (e.g., 'tomorrow at 2pm', 'March 27 at 10am')"
+          message: "Sorry, I couldn't understand the time. Please use a format like 'tomorrow at 2pm' or 'March 27 at 10:00 AM'."
         });
       }
       
-      // Case 2: Time provided, try to book
-      if (fn === "schedule_with_time") {
-        const { datetime, ...details } = args;
-        const duration = durations[details.session_type] || 30;
+      // Check availability
+      const freeSlots = await getFreeSlots(requestedTime.startOf('day'), duration, userTimezone);
+      const isFree = freeSlots.some(slot => slot.equals(requestedTime));
+      
+      if (isFree) {
+        // Create the event
+        const startDateTime = requestedTime;
+        const endDateTime = startDateTime.plus({ minutes: duration });
+        const event = {
+          summary: `${args.session_type.toUpperCase()} - ${args.name}`,
+          description: `Company: ${args.company}\nProperty: ${args.property}\nIssue: ${args.issue_description}\nPhone: ${args.phone_number}\nRestarted: ${args.restarted_computer}`,
+          start: { dateTime: startDateTime.toISO(), timeZone: userTimezone },
+          end: { dateTime: endDateTime.toISO(), timeZone: userTimezone },
+          attendees: [{ email: args.email }],
+        };
         
-        // Parse the datetime string
-        let requestedTime = parseDateTime(datetime, userTimezone);
-        if (!requestedTime) {
+        const response = await calendar.events.insert({
+          calendarId: CALENDAR_ID,
+          resource: event,
+          sendUpdates: "all",
+        });
+        
+        const eventLink = response.data.htmlLink;
+        const localTimeString = startDateTime.toLocaleString(DateTime.DATETIME_MED);
+        
+        return res.status(200).json({
+          action: "link",
+          message: `Your session has been scheduled for ${localTimeString}. Click the link to add it to your calendar:`,
+          url: eventLink
+        });
+      } else {
+        // Find alternative free slots on the same day
+        const alternativeSlots = freeSlots.slice(0, 5);
+        if (alternativeSlots.length === 0) {
           return res.status(200).json({
             action: "reply",
-            message: "Sorry, I couldn't understand the time. Please use a format like 'tomorrow at 2pm' or 'March 27 at 10:00 AM'."
+            message: "Sorry, there are no available slots on that day. Please try a different day."
           });
         }
-        
-        // Check availability
-        const freeSlots = await getFreeSlots(requestedTime.startOf('day'), duration, userTimezone);
-        const isFree = freeSlots.some(slot => slot.equals(requestedTime));
-        
-        if (isFree) {
-          // Create the event
-          const startDateTime = requestedTime;
-          const endDateTime = startDateTime.plus({ minutes: duration });
-          const event = {
-            summary: `${details.session_type.toUpperCase()} - ${details.name}`,
-            description: `Company: ${details.company}\nProperty: ${details.property}\nIssue: ${details.issue_description}\nPhone: ${details.phone_number}\nRestarted: ${details.restarted_computer}`,
-            start: { dateTime: startDateTime.toISO(), timeZone: userTimezone },
-            end: { dateTime: endDateTime.toISO(), timeZone: userTimezone },
-            attendees: [{ email: details.email }],
-          };
-          
-          const response = await calendar.events.insert({
-            calendarId: CALENDAR_ID,
-            resource: event,
-            sendUpdates: "all",
-          });
-          
-          const eventLink = response.data.htmlLink;
-          const localTimeString = startDateTime.toLocaleString(DateTime.DATETIME_MED);
-          
-          return res.status(200).json({
-            action: "link",
-            message: `Your session has been scheduled for ${localTimeString}. Click the link to add it to your calendar:`,
-            url: eventLink
-          });
-        } else {
-          // Find alternative free slots on the same day
-          const alternativeSlots = freeSlots.slice(0, 5); // show up to 5 alternatives
-          if (alternativeSlots.length === 0) {
-            return res.status(200).json({
-              action: "reply",
-              message: "Sorry, there are no available slots on that day. Please try a different day."
-            });
-          }
-          const slotList = alternativeSlots.map(slot => 
-            slot.toLocaleString(DateTime.TIME_SIMPLE)
-          ).join(", ");
-          return res.status(200).json({
-            action: "reply",
-            message: `That time is not available. The following times are free on the same day: ${slotList}. Please choose one (e.g., '${alternativeSlots[0].toLocaleString(DateTime.TIME_SIMPLE)}')`
-          });
-        }
+        const slotList = alternativeSlots.map(slot => 
+          slot.toLocaleString(DateTime.TIME_SIMPLE)
+        ).join(", ");
+        return res.status(200).json({
+          action: "reply",
+          message: `That time is not available. The following times are free on the same day: ${slotList}. Please choose one (e.g., '${alternativeSlots[0].toLocaleString(DateTime.TIME_SIMPLE)}')`
+        });
       }
     }
     
