@@ -27,9 +27,23 @@ const durations = {
 
 const systemPrompt = {
   role: "system",
-  content: `You are a Tech Johnny support assistant. Collect:
-Name, Email, Company, Property, Issue, Phone, Restarted (Yes/No), Session Type.
-Ask one question at a time. When complete, call function.`
+  content: `You are a friendly and thorough Tech Johnny support assistant. Your goal is to gather comprehensive information to help resolve the user's issue and schedule a support session if needed.
+
+Collect the following required details:
+- Name
+- Email
+- Company
+- Property (location or property name)
+- Issue description (be detailed: ask about exact problem, error messages, steps already taken, any recent changes, frequency, impact, etc.)
+- Phone number
+- Restarted computer (Yes/No; if no, encourage them to try restarting and report back)
+- Session type (choose from: 5min, 20min, 40min, 60min, nosub). Explain the options if needed.
+
+Ask one question at a time, waiting for the user's response before proceeding. Be conversational and helpful.
+
+For the issue description, gather as much detail as possible: error messages, what they were doing when it happened, how long it's been happening, what troubleshooting they've already done, and any other relevant context. Combine all this information into a single comprehensive description.
+
+Once you have collected all required fields, call the submit_support_request function with the details. Make sure the issue_description field contains all the detailed information you gathered.`
 };
 
 const functions = [{
@@ -56,33 +70,42 @@ async function getBusy(timeMin, timeMax) {
     const res = await calendar.freebusy.query({
       requestBody: { timeMin, timeMax, items: [{ id: CALENDAR_ID }] }
     });
-    return res.data.calendars[CALENDAR_ID].busy || [];
+    const busy = res.data.calendars[CALENDAR_ID].busy || [];
+    console.log(`✅ FreeBusy returned ${busy.length} busy periods`);
+    return { busy, error: null };
   } catch (err) {
     console.error("Calendar FreeBusy Error:", err);
-    return [];
+    return { busy: [], error: "Could not fetch calendar availability. Please try again later." };
   }
 }
 
-// Generate available slots (respects session duration)
+// Generate available slots – all times are converted to America/Belize for consistent comparison
 function generateSlots(busy, sessionMinutes = 30) {
   const slots = [];
-  let now = DateTime.now().setZone(TIMEZONE).plus({ minutes: 30 });
+  const now = DateTime.now().setZone(TIMEZONE).plus({ minutes: 30 });
   const end = now.plus({ hours: 24 });
 
-  while (now < end) {
-    const slotEnd = now.plus({ minutes: sessionMinutes });
+  // Convert busy intervals to local (America/Belize) DateTime objects once
+  const busyLocal = busy.map(b => ({
+    start: DateTime.fromISO(b.start).setZone(TIMEZONE),
+    end: DateTime.fromISO(b.end).setZone(TIMEZONE)
+  }));
 
-    const isBusy = busy.some(b => {
-      const start = DateTime.fromISO(b.start);
-      const end = DateTime.fromISO(b.end);
-      return now < end && slotEnd > start;
+  let slotStart = now;
+  while (slotStart < end) {
+    const slotEnd = slotStart.plus({ minutes: sessionMinutes });
+
+    // Check if slot overlaps any busy period
+    const isBusy = busyLocal.some(b => {
+      return slotStart < b.end && slotEnd > b.start;
     });
 
-    if (!isBusy && now.hour >= 8 && now.hour <= 18) {
-      slots.push(now.toISO());
+    // Only suggest slots within business hours (8 AM – 6 PM)
+    if (!isBusy && slotStart.hour >= 8 && slotStart.hour <= 18) {
+      slots.push(slotStart.toISO());
     }
 
-    now = now.plus({ minutes: 30 });
+    slotStart = slotStart.plus({ minutes: 30 });
   }
 
   return slots;
@@ -94,7 +117,19 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
+  // Handle preflight
   if (req.method === "OPTIONS") return res.status(200).end();
+
+  // Only POST is allowed
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  // Validate request body
+  if (!req.body || typeof req.body !== "object") {
+    console.error("Invalid request body:", req.body);
+    return res.status(400).json({ action: "reply", message: "Invalid request. Please send a valid JSON body." });
+  }
 
   console.log("Incoming request body:", req.body);
 
@@ -162,7 +197,12 @@ export default async function handler(req, res) {
 
       const now = DateTime.now().setZone(TIMEZONE);
       const sessionMinutes = durations[args.session_type] || 30;
-      const busy = await getBusy(now.toUTC().toISO(), now.plus({ hours: 24 }).toUTC().toISO());
+      const { busy, error } = await getBusy(now.toUTC().toISO(), now.plus({ hours: 24 }).toUTC().toISO());
+
+      if (error) {
+        return res.json({ action: "reply", message: error });
+      }
+
       const slots = generateSlots(busy, sessionMinutes);
 
       return res.json({
