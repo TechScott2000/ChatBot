@@ -35,32 +35,21 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "File upload failed" });
     }
 
-    const file = files.file;
-    if (!file) {
+    // In formidable v3, files.file is an array even with multiples:false
+    const fileArray = files.file;
+    if (!fileArray || !Array.isArray(fileArray) || fileArray.length === 0) {
       return res.status(400).json({ error: "No file uploaded" });
     }
 
-    // TEMPORARY: return the file object structure to see what we have
-    // This will show us the keys in the response
-    const fileInfo = {
-      isArray: Array.isArray(file),
-      keys: Object.keys(file),
-      hasFilepath: !!file.filepath,
-      hasPath: !!file.path,
-      sample: file,
-    };
-    // Remove this block after debugging
-    return res.status(500).json({ error: "Debug info", fileInfo });
-
-    // The rest of the upload code is commented for now
-    /*
-    const filePath = file.filepath || file.path;
+    const file = fileArray[0]; // take the first file
+    const filePath = file.filepath; // property name in v3
     if (!filePath) {
-      console.error("No file path found in file object");
+      console.error("No filepath found in file object");
       return res.status(500).json({ error: "Invalid file object" });
     }
 
     try {
+      // Verify temporary file exists
       if (!fs.existsSync(filePath)) {
         console.error("Temporary file does not exist:", filePath);
         return res.status(500).json({ error: "Temporary file missing" });
@@ -79,6 +68,7 @@ export default async function handler(req, res) {
         fields: "id,webViewLink",
       });
 
+      // Make file publicly readable
       await drive.permissions.create({
         fileId: response.data.id,
         requestBody: {
@@ -87,6 +77,7 @@ export default async function handler(req, res) {
         },
       });
 
+      // Clean up temporary file
       fs.unlinkSync(filePath);
 
       return res.json({
@@ -97,6 +88,5 @@ export default async function handler(req, res) {
       console.error("Drive upload error:", error);
       return res.status(500).json({ error: "Failed to upload to Drive" });
     }
-    */
   });
 }
