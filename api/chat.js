@@ -64,7 +64,7 @@ const functions = [{
   }
 }];
 
-// Get busy times from calendar
+// Get busy times from calendar – returns { busy, error }
 async function getBusy(timeMin, timeMax) {
   try {
     const res = await calendar.freebusy.query({
@@ -79,7 +79,7 @@ async function getBusy(timeMin, timeMax) {
   }
 }
 
-// Generate available slots – all times are converted to America/Belize for consistent comparison
+// Generate available slots – 20‑minute intervals, respecting busy periods
 function generateSlots(busy, sessionMinutes = 30) {
   const slots = [];
   const now = DateTime.now().setZone(TIMEZONE).plus({ minutes: 30 });
@@ -105,7 +105,8 @@ function generateSlots(busy, sessionMinutes = 30) {
       slots.push(slotStart.toISO());
     }
 
-    slotStart = slotStart.plus({ minutes: 30 });
+    // 20‑minute step
+    slotStart = slotStart.plus({ minutes: 20 });
   }
 
   return slots;
