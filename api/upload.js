@@ -4,11 +4,10 @@ import fs from "fs";
 
 export const config = {
   api: {
-    bodyParser: false, // required for file uploads
+    bodyParser: false,
   },
 };
 
-// Separate OAuth2 client for Google Drive
 const driveOAuth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_DRIVE_CLIENT_ID,
   process.env.GOOGLE_DRIVE_CLIENT_SECRET,
@@ -22,7 +21,6 @@ driveOAuth2Client.setCredentials({
 const drive = google.drive({ version: "v3", auth: driveOAuth2Client });
 
 export default async function handler(req, res) {
-  // CORS headers
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -30,7 +28,7 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const form = formidable({ multiples: false }); // single file
+  const form = formidable({ multiples: false });
   form.parse(req, async (err, fields, files) => {
     if (err) {
       console.error("Form parse error:", err);
@@ -42,12 +40,28 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "No file uploaded" });
     }
 
+    // Log the file object to see its structure (remove after debugging)
+    console.log("File object:", JSON.stringify(file, null, 2));
+
+    // Determine the correct path property (filepath in v3, path in older versions)
+    const filePath = file.filepath || file.path;
+    if (!filePath) {
+      console.error("No file path found in file object");
+      return res.status(500).json({ error: "Invalid file object" });
+    }
+
     try {
-      const fileStream = fs.createReadStream(file.filepath);
+      // Check if the file exists
+      if (!fs.existsSync(filePath)) {
+        console.error("Temporary file does not exist:", filePath);
+        return res.status(500).json({ error: "Temporary file missing" });
+      }
+
+      const fileStream = fs.createReadStream(filePath);
       const response = await drive.files.create({
         requestBody: {
           name: file.originalFilename || "upload.jpg",
-          parents: ["root"], // Change to a specific folder ID if desired
+          parents: ["root"],
         },
         media: {
           mimeType: file.mimetype,
@@ -56,7 +70,6 @@ export default async function handler(req, res) {
         fields: "id,webViewLink",
       });
 
-      // Make the file publicly accessible (anyone with the link can view)
       await drive.permissions.create({
         fileId: response.data.id,
         requestBody: {
@@ -65,8 +78,8 @@ export default async function handler(req, res) {
         },
       });
 
-      // Clean up temporary file
-      fs.unlinkSync(file.filepath);
+      // Clean up
+      fs.unlinkSync(filePath);
 
       return res.json({
         success: true,
