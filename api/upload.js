@@ -40,10 +40,20 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "No file uploaded" });
     }
 
-    // Log the file object to see its structure (remove after debugging)
-    console.log("File object:", JSON.stringify(file, null, 2));
+    // TEMPORARY: return the file object structure to see what we have
+    // This will show us the keys in the response
+    const fileInfo = {
+      isArray: Array.isArray(file),
+      keys: Object.keys(file),
+      hasFilepath: !!file.filepath,
+      hasPath: !!file.path,
+      sample: file,
+    };
+    // Remove this block after debugging
+    return res.status(500).json({ error: "Debug info", fileInfo });
 
-    // Determine the correct path property (filepath in v3, path in older versions)
+    // The rest of the upload code is commented for now
+    /*
     const filePath = file.filepath || file.path;
     if (!filePath) {
       console.error("No file path found in file object");
@@ -51,7 +61,6 @@ export default async function handler(req, res) {
     }
 
     try {
-      // Check if the file exists
       if (!fs.existsSync(filePath)) {
         console.error("Temporary file does not exist:", filePath);
         return res.status(500).json({ error: "Temporary file missing" });
@@ -78,7 +87,6 @@ export default async function handler(req, res) {
         },
       });
 
-      // Clean up
       fs.unlinkSync(filePath);
 
       return res.json({
@@ -89,5 +97,6 @@ export default async function handler(req, res) {
       console.error("Drive upload error:", error);
       return res.status(500).json({ error: "Failed to upload to Drive" });
     }
+    */
   });
 }
