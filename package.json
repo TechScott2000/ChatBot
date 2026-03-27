@@ -6,6 +6,7 @@
   "dependencies": {
     "openai": "^4.0.0",
     "googleapis": "^108.0.0",
-    "luxon": "^3.4.4"
+    "luxon": "^3.4.4",
+    "formidable": "^3.5.1"
   }
 }
