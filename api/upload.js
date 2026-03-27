@@ -41,15 +41,14 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "No file uploaded" });
     }
 
-    const file = fileArray[0]; // take the first file
-    const filePath = file.filepath; // property name in v3
+    const file = fileArray[0];
+    const filePath = file.filepath;
     if (!filePath) {
       console.error("No filepath found in file object");
       return res.status(500).json({ error: "Invalid file object" });
     }
 
     try {
-      // Verify temporary file exists
       if (!fs.existsSync(filePath)) {
         console.error("Temporary file does not exist:", filePath);
         return res.status(500).json({ error: "Temporary file missing" });
@@ -68,7 +67,6 @@ export default async function handler(req, res) {
         fields: "id,webViewLink",
       });
 
-      // Make file publicly readable
       await drive.permissions.create({
         fileId: response.data.id,
         requestBody: {
@@ -77,7 +75,6 @@ export default async function handler(req, res) {
         },
       });
 
-      // Clean up temporary file
       fs.unlinkSync(filePath);
 
       return res.json({
