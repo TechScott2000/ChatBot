@@ -37,7 +37,7 @@ Collect the following required details:
 - Email
 - Company
 - Property (location or property name)
-- Issue description (be detailed: ask about exact problem, error messages, steps already taken, any recent changes, frequency, impact, etc.)
+- Issue description (be detailed: ask about exact problem, steps already taken, any recent changes, etc.)
 - Phone number
 - Restarted computer (Yes/No; if no, encourage them to try restarting and report back)
 - Session type (choose from: 5min, 20min, 40min, 60min, nosub). Explain the options if needed.
