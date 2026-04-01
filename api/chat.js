@@ -140,21 +140,42 @@ function buildCustomAnswers(sessionType, userData) {
 }
 
 /**
- * Create a scheduled event in Calendly.
+ * Create a scheduled event in Calendly using the /invitees endpoint (Scheduling API).
  */
-async function bookCalendlyEvent(eventTypeUri, startTime, invitee, customAnswers) {
+async function bookCalendlyEvent(eventTypeUri, startTime, invitee, customAnswers, sessionType) {
+  // Build questions_and_answers with position
+  const questionsAndAnswers = customAnswers.map((qa, index) => ({
+    question: qa.question,
+    answer: qa.answer,
+    position: index,
+  }));
+
+  // Determine location based on session type
+  let location = null;
+  if (sessionType === "nosub") {
+    // The nosub event type uses an inbound call location with a specific phone number
+    location = { kind: "inbound_call", phone_number: "+1 248-905-1529" };
+  } else {
+    // Other event types use Google Conference (as configured in Calendly)
+    location = { kind: "google_conference" };
+  }
+
   const payload = {
     event_type: eventTypeUri,
     start_time: startTime,
     invitee: {
       name: invitee.name,
       email: invitee.email,
-      ...(invitee.phone && { phone: invitee.phone }),
+      timezone: TIMEZONE,
+      ...(invitee.phone && { text_reminder_number: invitee.phone }), // for SMS reminders
     },
-    questions_and_answers: customAnswers,
+    questions_and_answers: questionsAndAnswers,
+    ...(location && { location }), // include location if defined
   };
 
-  const response = await fetch(`${CALENDLY_API_BASE}/scheduled_events`, {
+  console.log("📤 Calendly booking payload:", JSON.stringify(payload, null, 2));
+
+  const response = await fetch(`${CALENDLY_API_BASE}/invitees`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${CALENDLY_ACCESS_TOKEN}`,
@@ -165,6 +186,7 @@ async function bookCalendlyEvent(eventTypeUri, startTime, invitee, customAnswers
 
   if (!response.ok) {
     const errorBody = await response.text();
+    console.error("❌ Calendly booking error response:", errorBody);
     throw new Error(`Calendly booking failed (${response.status}): ${errorBody}`);
   }
   return response.json();
@@ -200,6 +222,20 @@ export default async function handler(req, res) {
         return res.json({ action: "reply", message: "Invalid session type." });
       }
 
+      // Ensure selectedTime is in UTC ISO format (with 'Z' or offset)
+      let startTimeUtc = selectedTime;
+      if (!selectedTime.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[-+]\d{2}:\d{2})/)) {
+        // Attempt to parse as local time in Belize
+        const local = DateTime.fromFormat(selectedTime, "M/d/yyyy, h:mm:ss a", { zone: TIMEZONE });
+        if (local.isValid) {
+          startTimeUtc = local.toUTC().toISO();
+          console.log(`Converted local time "${selectedTime}" to UTC: ${startTimeUtc}`);
+        } else {
+          console.error(`Invalid time format: ${selectedTime}`);
+          return res.json({ action: "reply", message: "Invalid time format. Please select a time again." });
+        }
+      }
+
       const invitee = {
         name: userData.name,
         email: userData.email,
@@ -217,11 +253,13 @@ export default async function handler(req, res) {
       }
 
       try {
-        const booking = await bookCalendlyEvent(eventTypeUri, selectedTime, invitee, customAnswers);
+        const booking = await bookCalendlyEvent(eventTypeUri, startTimeUtc, invitee, customAnswers, sessionType);
+        // The response contains an invitee object; we can return a link to the event or just a success message.
+        const inviteeUri = booking.resource?.uri;
         return res.json({
           action: "link",
           message: "Booked successfully! You will receive a confirmation email and SMS shortly.",
-          url: booking.resource.uri,
+          url: inviteeUri, // optional, could be used by frontend
         });
       } catch (err) {
         console.error("Calendly booking error:", err);
