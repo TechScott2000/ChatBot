@@ -7,7 +7,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const CALENDLY_API_BASE = "https://api.calendly.com";
 const CALENDLY_ACCESS_TOKEN = process.env.CALENDLY_ACCESS_TOKEN;
 
-// Map session types to Calendly event type URIs
+// Map session types to Calendly event type URIs (obtained from your account)
 const eventTypeMap = {
   "5min":  "https://api.calendly.com/event_types/2ca6b53a-d972-4b1a-a433-f26bcee8b5da",
   "20min": "https://api.calendly.com/event_types/CHAGLS4CIMH5D4FU",
@@ -71,10 +71,6 @@ const functions = [{
 
 /**
  * Fetch available slots from Calendly for a given event type.
- * @param {string} eventTypeUri - Full URI of the Calendly event type
- * @param {DateTime} startTime - Start of time window (local)
- * @param {DateTime} endTime - End of time window
- * @returns {Promise<string[]|null>} Array of ISO start times (UTC) or null on error
  */
 async function getCalendlySlots(eventTypeUri, startTime, endTime) {
   try {
@@ -269,10 +265,11 @@ export default async function handler(req, res) {
         return res.json({ action: "reply", message: "Invalid session type. Please choose from: 5min, 20min, 40min, 60min, nosub." });
       }
 
-      // Get available slots for the next 7 days (starting now)
+      // Get available slots for the next 7 days, starting 1 minute from now
       const now = DateTime.now().setZone(TIMEZONE);
+      const startTime = now.plus({ minutes: 1 });   // ensure start_time is in the future
       const endTime = now.plus({ days: 7 });
-      const slots = await getCalendlySlots(eventTypeUri, now, endTime);
+      const slots = await getCalendlySlots(eventTypeUri, startTime, endTime);
 
       if (!slots || slots.length === 0) {
         return res.json({
