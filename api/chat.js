@@ -309,7 +309,7 @@ export default async function handler(req, res) {
 
       // Get available slots for the next 24 hours (adjust as needed)
       const now = DateTime.now().setZone(TIMEZONE);
-      const endTime = now.plus({ hours: 24 });
+      const endTime = now.plus({ days: 2 });
       const slots = await getCalendlySlots(eventTypeUri, now, endTime);
 
       if (!slots || slots.length === 0) {
