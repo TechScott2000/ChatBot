@@ -306,27 +306,27 @@ export default async function handler(req, res) {
       if (!eventTypeUri) {
         return res.json({ action: "reply", message: "Invalid session type. Please choose from: 5min, 20min, 40min, 60min, nosub." });
       }
+// Get available slots for the next 7 days (or whatever range you prefer)
+const now = DateTime.now().setZone(TIMEZONE);
+const startTime = now;                               // start immediately
+const endTime = now.plus({ days: 7 });               // look 7 days ahead
 
-      // Get available slots for the next 24 hours (adjust as needed)
-      const now = DateTime.now().setZone(TIMEZONE);
-      const endTime = now.plus({ days: 2 });
-      const slots = await getCalendlySlots(eventTypeUri, now, endTime);
+const slots = await getCalendlySlots(eventTypeUri, startTime, endTime);
 
-      if (!slots || slots.length === 0) {
-        return res.json({
-          action: "reply",
-          message: "No available slots in the next 24 hours. Please try a different session type or try again later.",
-        });
-      }
+if (!slots || slots.length === 0) {
+  return res.json({
+    action: "reply",
+    message: "No available slots in the next 7 days for that session type. Please try another session type or try again later.",
+  });
+}
 
-      // Return slots to the frontend
-      return res.json({
-        action: "slots",
-        message: "Choose a time:",
-        slots: slots.slice(0, 8),   // limit to 8 slots
-        userData: args,
-      });
-    }
+// Return slots to the frontend
+return res.json({
+  action: "slots",
+  message: "Choose a time:",
+  slots: slots.slice(0, 8),   // limit to 8 slots
+  userData: args,
+});
 
     // Regular reply (no function call)
     return res.json({ action: "reply", message: msg.content });
