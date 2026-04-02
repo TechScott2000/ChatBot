@@ -340,7 +340,7 @@ export default async function handler(req, res) {
   if (!intent && messages && messages.length > 0) {
     const lastUserMsg = [...messages].reverse().find(m => m.role === "user");
     if (lastUserMsg) {
-      const lower = lastUserMsg.content.toLowerCase();
+      const lower = lastUserMsg.content.trim().toLowerCase();  // <-- TRIM added here
       if (lower === "onboard" || lower === "support") {
         intent = lower;
       }
