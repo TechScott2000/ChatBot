@@ -58,7 +58,7 @@ If a user asks to schedule without providing all details, continue asking for mi
 const onboardingSystemPrompt = {
   role: "system",
   content: `You are a Tech Johnny onboarding assistant. You must collect the following 28 workstation details **one at a time**:
-- primary_work_location (free text)
+- primary_work_location
 - team_member_name
 - phone
 - system_name
@@ -89,9 +89,7 @@ const onboardingSystemPrompt = {
 
 Ask for each field individually, waiting for the user's response before moving to the next. Do not skip any field.
 
-After you have collected all 28 details, **immediately call** the function submit_onboarding_request with the collected data. Do not add any summary, do not invent a reference number, and do not offer to proceed with setup. The system will create a ticket.
-
-If a user asks to proceed without providing all details, continue asking for missing details. Never invent data.`
+After you have collected all 28 details, **immediately call** the function submit_onboarding_request with the collected data. Do not add any summary, do not invent a reference number, and do not offer to proceed with setup. The system will create a ticket.`
 };
 
 const supportFunctions = [{
@@ -164,17 +162,20 @@ async function getCalendlySlots(eventTypeUri, startTime, endTime) {
     const startIso = startTime.toUTC().toISO();
     const endIso = endTime.toUTC().toISO();
     const url = `${CALENDLY_API_BASE}/event_type_available_times?event_type=${encodeURIComponent(eventTypeUri)}&start_time=${startIso}&end_time=${endIso}`;
+
     const response = await fetch(url, {
       headers: {
         Authorization: `Bearer ${CALENDLY_ACCESS_TOKEN}`,
         "Content-Type": "application/json",
       },
     });
+
     if (!response.ok) {
       const errorText = await response.text();
       console.error("Calendly availability error:", response.status, errorText);
       return null;
     }
+
     const data = await response.json();
     return data.collection.map(slot => slot.start_time);
   } catch (err) {
@@ -270,6 +271,7 @@ async function bookCalendlyEvent(eventTypeUri, startTime, invitee, customAnswers
     const errorBody = await response.text();
     throw new Error(`Calendly booking failed (${response.status}): ${errorBody}`);
   }
+
   return response.json();
 }
 
@@ -317,10 +319,11 @@ async function createSuperOpsTicket(onboardingData) {
     console.error("SuperOps mutation errors:", result.errors);
     throw new Error(result.errors[0].message);
   }
+
   return result.data.createTicket;
 }
 
-// ======================= Main Next.js API Handler =======================
+// ======================= MAIN HANDLER =======================
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -330,124 +333,72 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   if (!req.body || typeof req.body !== "object") {
-    return res.status(400).json({ action: "reply", message: "Invalid request. Please send a valid JSON body." });
+    return res.status(400).json({ action: "reply", message: "Invalid request body" });
   }
 
-  console.log("Incoming request body:", req.body);
-
-  // Determine flow: if an intent is already set, use it; otherwise check conversation history
   let { intent, messages } = req.body;
-  if (!intent && messages && messages.length > 0) {
+
+  if (!intent && messages?.length) {
     const lastUserMsg = [...messages].reverse().find(m => m.role === "user");
     if (lastUserMsg) {
-      const lower = lastUserMsg.content.trim().toLowerCase();  // <-- TRIM added here
+      const lower = lastUserMsg.content.trim().toLowerCase(); // FIX: trim safety
       if (lower === "onboard" || lower === "support") {
         intent = lower;
       }
     }
   }
 
-  // If we still don't have an intent, use the router to ask
+  // ================= ROUTER =================
   if (!intent) {
-    try {
-      if (!messages || messages.length === 0) {
-        return res.json({
-          action: "reply",
-          message: "Hello! I'm Tech Johnny's assistant. Would you like to **onboard** a new user (collect workstation details) or **open a support ticket** (schedule a session with a technician)? Please reply with 'onboard' or 'support'."
-        });
-      } else {
-        const completion = await openai.chat.completions.create({
-          model: "gpt-4.1-mini",
-          messages: [routerSystemPrompt, ...messages],
-          // No functions or function_call parameters
-        });
-        const reply = completion.choices[0].message.content;
-        return res.json({ action: "reply", message: reply });
-      }
-    } catch (err) {
-      console.error("Router error:", err);
-      return res.json({ action: "reply", message: "Sorry, I'm having trouble. Please try again." });
-    }
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [routerSystemPrompt, ...messages],
+    });
+
+    return res.json({
+      action: "reply",
+      message: completion.choices[0].message.content,
+    });
   }
 
-  // ======================= ONBOARDING FLOW =======================
+  // ================= ONBOARD =================
   if (intent === "onboard") {
-    try {
-      if (!messages || !Array.isArray(messages)) {
-        return res.json({ action: "reply", message: "Invalid messages format." });
-      }
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [onboardingSystemPrompt, ...messages],
+      functions: onboardingFunctions,
+      function_call: "auto",
+    });
 
-      let completion;
+    const msg = completion.choices[0].message;
+
+    if (msg.function_call?.name === "submit_onboarding_request") {
+      let args = {};
       try {
-        completion = await openai.chat.completions.create({
-          model: "gpt-4.1-mini",
-          messages: [onboardingSystemPrompt, ...messages],
-          functions: onboardingFunctions,
-          function_call: "auto",
-        });
-      } catch (err) {
-        console.error("OpenAI Completion Error:", err);
-        return res.json({ action: "reply", message: "Error reaching OpenAI. Try again." });
+        args = JSON.parse(msg.function_call.arguments);
+      } catch (e) {
+        console.error("Parse error:", e);
       }
 
-      const msg = completion.choices[0].message;
+      const ticket = await createSuperOpsTicket(args);
 
-      if (msg.function_call && msg.function_call.name === "submit_onboarding_request") {
-        let args = {};
-        try {
-          args = JSON.parse(msg.function_call.arguments);
-        } catch (err) {
-          console.error("Function call args parse error:", err);
-        }
-
-        try {
-          const ticket = await createSuperOpsTicket(args);
-          console.log("✅ Ticket created:", ticket);
-          return res.json({
-            action: "reply",
-            message: `Thank you! An onboarding ticket (${ticket.displayId}) has been created. Our team will review it and reach out if needed.`,
-          });
-        } catch (err) {
-          console.error("Failed to create SuperOps ticket:", err);
-          return res.json({
-            action: "reply",
-            message: "We received your information, but there was an issue creating the ticket. Our team has been notified. Please contact support if you don't hear back soon.",
-          });
-        }
-      }
-
-      return res.json({ action: "reply", message: msg.content });
-    } catch (err) {
-      console.error("Unexpected onboarding error:", err);
-      return res.json({ action: "reply", message: "Something went wrong during onboarding. Please try again." });
+      return res.json({
+        action: "reply",
+        message: `Onboarding ticket created: ${ticket?.displayId || "SUCCESS"}`
+      });
     }
+
+    return res.json({ action: "reply", message: msg.content });
   }
 
-  // ======================= SUPPORT FLOW =======================
+  // ================= SUPPORT =================
   try {
     if (req.body.action === "book") {
       const { selectedTime, userData, fileLink } = req.body;
-      if (!selectedTime || !userData) {
-        return res.json({ action: "reply", message: "Invalid booking data." });
-      }
 
-      const sessionType = userData.session_type;
-      const eventTypeUri = eventTypeMap[sessionType];
-      if (!eventTypeUri) {
-        return res.json({ action: "reply", message: "Invalid session type." });
-      }
+      const eventTypeUri = eventTypeMap[userData.session_type];
 
       let startTimeUtc = selectedTime;
-      if (!selectedTime.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[-+]\d{2}:\d{2})/)) {
-        const local = DateTime.fromFormat(selectedTime, "M/d/yyyy, h:mm:ss a", { zone: TIMEZONE });
-        if (local.isValid) {
-          startTimeUtc = local.toUTC().toISO();
-          console.log(`Converted local time "${selectedTime}" to UTC: ${startTimeUtc}`);
-        } else {
-          console.error(`Invalid time format: ${selectedTime}`);
-          return res.json({ action: "reply", message: "Invalid time format. Please select a time again." });
-        }
-      }
 
       const invitee = {
         name: userData.name,
@@ -455,85 +406,61 @@ export default async function handler(req, res) {
         phone: userData.phone_number,
       };
 
-      let customAnswers = buildCustomAnswers(sessionType, userData);
+      const customAnswers = buildCustomAnswers(userData.session_type, userData);
 
-      if (fileLink && customAnswers.some(a => a.question === "Description of issue" || a.question === "Please share anything that will help prepare for our meeting.")) {
-        const descAnswer = customAnswers.find(a => a.question === "Description of issue" || a.question === "Please share anything that will help prepare for our meeting.");
-        if (descAnswer) {
-          descAnswer.answer += `\n\nAttached image: ${fileLink}`;
-        }
+      if (fileLink) {
+        const desc = customAnswers.find(a =>
+          a.question.includes("Description") || a.question.includes("prepare")
+        );
+        if (desc) desc.answer += `\n\nAttachment: ${fileLink}`;
       }
 
-      try {
-        const booking = await bookCalendlyEvent(eventTypeUri, startTimeUtc, invitee, customAnswers, sessionType);
-        const inviteeUri = booking.resource?.uri;
-        return res.json({
-          action: "link",
-          message: "Booked successfully! You will receive a confirmation email and SMS shortly.",
-          url: inviteeUri,
-        });
-      } catch (err) {
-        console.error("Calendly booking error:", err);
-        return res.json({ action: "reply", message: "Booking failed. Please try another time or contact support." });
-      }
-    }
+      const booking = await bookCalendlyEvent(
+        eventTypeUri,
+        startTimeUtc,
+        invitee,
+        customAnswers,
+        userData.session_type
+      );
 
-    if (!messages || !Array.isArray(messages)) {
-      return res.json({ action: "reply", message: "Invalid messages format." });
-    }
-
-    let completion;
-    try {
-      completion = await openai.chat.completions.create({
-        model: "gpt-4.1-mini",
-        messages: [supportSystemPrompt, ...messages],
-        functions: supportFunctions,
-        function_call: "auto",
+      return res.json({
+        action: "link",
+        url: booking.resource?.uri,
       });
-    } catch (err) {
-      console.error("OpenAI Completion Error:", err);
-      return res.json({ action: "reply", message: "Error reaching OpenAI. Try again." });
     }
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [supportSystemPrompt, ...messages],
+      functions: supportFunctions,
+      function_call: "auto",
+    });
 
     const msg = completion.choices[0].message;
 
-    if (msg.function_call) {
-      let args = {};
-      try {
-        args = JSON.parse(msg.function_call.arguments);
-      } catch (err) {
-        console.error("Function call args parse error:", err);
-      }
+    if (msg.function_call?.name === "submit_support_request") {
+      const args = JSON.parse(msg.function_call.arguments || "{}");
 
-      const sessionType = args.session_type;
-      const eventTypeUri = eventTypeMap[sessionType];
-      if (!eventTypeUri) {
-        return res.json({ action: "reply", message: "Invalid session type. Please choose from: 5min, 20min, 40min, 60min, nosub." });
-      }
+      const eventTypeUri = eventTypeMap[args.session_type];
 
       const now = DateTime.now().setZone(TIMEZONE);
       const startTime = now.plus({ minutes: 1 });
       const endTime = now.plus({ days: 7 });
-      const slots = await getCalendlySlots(eventTypeUri, startTime, endTime);
 
-      if (!slots || slots.length === 0) {
-        return res.json({
-          action: "reply",
-          message: "No available slots in the next 7 days for that session type. Please try another session type or try again later.",
-        });
-      }
+      const slots = await getCalendlySlots(eventTypeUri, startTime, endTime);
 
       return res.json({
         action: "slots",
         message: "Choose a time:",
-        slots: slots.slice(0, 8),
+        slots: slots?.slice(0, 8) || [],
         userData: args,
       });
     }
 
     return res.json({ action: "reply", message: msg.content });
+
   } catch (err) {
-    console.error("Unexpected support flow error:", err);
-    return res.json({ action: "reply", message: "Something went wrong. Please try again." });
+    console.error("Support flow error:", err);
+    return res.json({ action: "reply", message: "Something went wrong." });
   }
 }
