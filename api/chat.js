@@ -7,7 +7,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const CALENDLY_API_BASE = "https://api.calendly.com";
 const CALENDLY_ACCESS_TOKEN = process.env.CALENDLY_ACCESS_TOKEN;
 
-// Map session types to Calendly event type URIs (obtained from your account)
+// Map session types to Calendly event type URIs
 const eventTypeMap = {
   "5min":  "https://api.calendly.com/event_types/2ca6b53a-d972-4b1a-a433-f26bcee8b5da",
   "20min": "https://api.calendly.com/event_types/CHAGLS4CIMH5D4FU",
@@ -16,7 +16,6 @@ const eventTypeMap = {
   "nosub": "https://api.calendly.com/event_types/DEPEABECSGGRWQXT",
 };
 
-// Duration mapping (for reference only)
 const durations = {
   "5min": 5,
   "20min": 20,
@@ -69,9 +68,6 @@ const functions = [{
 
 // ======================= Calendly Helper Functions =======================
 
-/**
- * Fetch available slots from Calendly for a given event type.
- */
 async function getCalendlySlots(eventTypeUri, startTime, endTime) {
   try {
     const startIso = startTime.toUTC().toISO();
@@ -96,9 +92,6 @@ async function getCalendlySlots(eventTypeUri, startTime, endTime) {
   }
 }
 
-/**
- * Build the custom answers array based on the selected event type and collected data.
- */
 function buildCustomAnswers(sessionType, userData) {
   const answers = [];
   const { company, property, issue_description, phone_number, restarted_computer } = userData;
@@ -139,9 +132,6 @@ function buildCustomAnswers(sessionType, userData) {
   return answers;
 }
 
-/**
- * Create a scheduled event in Calendly using the /invitees endpoint (Scheduling API).
- */
 async function bookCalendlyEvent(eventTypeUri, startTime, invitee, customAnswers, sessionType) {
   // Build questions_and_answers with position
   const questionsAndAnswers = customAnswers.map((qa, index) => ({
@@ -153,10 +143,8 @@ async function bookCalendlyEvent(eventTypeUri, startTime, invitee, customAnswers
   // Determine location based on session type
   let location = null;
   if (sessionType === "nosub") {
-    // The nosub event type uses an inbound call location with a specific phone number
     location = { kind: "inbound_call", phone_number: "+1 248-905-1529" };
   } else {
-    // Other event types use Google Conference (as configured in Calendly)
     location = { kind: "google_conference" };
   }
 
@@ -167,11 +155,31 @@ async function bookCalendlyEvent(eventTypeUri, startTime, invitee, customAnswers
       name: invitee.name,
       email: invitee.email,
       timezone: TIMEZONE,
-      ...(invitee.phone && { text_reminder_number: invitee.phone }), // for SMS reminders
     },
     questions_and_answers: questionsAndAnswers,
-    ...(location && { location }), // include location if defined
+    ...(location && { location }),
   };
+
+  // Add text_reminder_number only if the phone number is in a valid E.164 format
+  if (invitee.phone) {
+    let phone = invitee.phone.trim();
+    // Remove any non-digit characters
+    const digitsOnly = phone.replace(/\D/g, '');
+    if (phone.startsWith('+')) {
+      // Already has country code, assume correct
+      payload.invitee.text_reminder_number = phone;
+    } else if (digitsOnly.length === 10) {
+      // Assume US/Canada number, add +1
+      payload.invitee.text_reminder_number = `+1${digitsOnly}`;
+      console.log(`Formatted phone number: ${phone} -> ${payload.invitee.text_reminder_number}`);
+    } else if (digitsOnly.length === 7) {
+      // Belize number (7 digits), add +501
+      payload.invitee.text_reminder_number = `+501${digitsOnly}`;
+      console.log(`Formatted Belize phone number: ${phone} -> ${payload.invitee.text_reminder_number}`);
+    } else {
+      console.warn(`Could not format phone number: ${phone} – omitting text_reminder_number`);
+    }
+  }
 
   console.log("📤 Calendly booking payload:", JSON.stringify(payload, null, 2));
 
@@ -194,7 +202,6 @@ async function bookCalendlyEvent(eventTypeUri, startTime, invitee, customAnswers
 
 // ======================= Main Next.js API Handler =======================
 export default async function handler(req, res) {
-  // CORS headers
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -222,10 +229,9 @@ export default async function handler(req, res) {
         return res.json({ action: "reply", message: "Invalid session type." });
       }
 
-      // Ensure selectedTime is in UTC ISO format (with 'Z' or offset)
+      // Ensure selectedTime is in UTC ISO format
       let startTimeUtc = selectedTime;
       if (!selectedTime.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[-+]\d{2}:\d{2})/)) {
-        // Attempt to parse as local time in Belize
         const local = DateTime.fromFormat(selectedTime, "M/d/yyyy, h:mm:ss a", { zone: TIMEZONE });
         if (local.isValid) {
           startTimeUtc = local.toUTC().toISO();
@@ -244,7 +250,6 @@ export default async function handler(req, res) {
 
       let customAnswers = buildCustomAnswers(sessionType, userData);
 
-      // Append file link if present
       if (fileLink && customAnswers.some(a => a.question === "Description of issue" || a.question === "Please share anything that will help prepare for our meeting.")) {
         const descAnswer = customAnswers.find(a => a.question === "Description of issue" || a.question === "Please share anything that will help prepare for our meeting.");
         if (descAnswer) {
@@ -254,12 +259,11 @@ export default async function handler(req, res) {
 
       try {
         const booking = await bookCalendlyEvent(eventTypeUri, startTimeUtc, invitee, customAnswers, sessionType);
-        // The response contains an invitee object; we can return a link to the event or just a success message.
         const inviteeUri = booking.resource?.uri;
         return res.json({
           action: "link",
           message: "Booked successfully! You will receive a confirmation email and SMS shortly.",
-          url: inviteeUri, // optional, could be used by frontend
+          url: inviteeUri,
         });
       } catch (err) {
         console.error("Calendly booking error:", err);
@@ -288,7 +292,6 @@ export default async function handler(req, res) {
 
     const msg = completion.choices[0].message;
 
-    // If the AI wants to submit the request (function call)
     if (msg.function_call) {
       let args = {};
       try {
@@ -303,9 +306,8 @@ export default async function handler(req, res) {
         return res.json({ action: "reply", message: "Invalid session type. Please choose from: 5min, 20min, 40min, 60min, nosub." });
       }
 
-      // Get available slots for the next 7 days, starting 1 minute from now
       const now = DateTime.now().setZone(TIMEZONE);
-      const startTime = now.plus({ minutes: 1 });   // ensure start_time is in the future
+      const startTime = now.plus({ minutes: 1 });
       const endTime = now.plus({ days: 7 });
       const slots = await getCalendlySlots(eventTypeUri, startTime, endTime);
 
@@ -316,7 +318,6 @@ export default async function handler(req, res) {
         });
       }
 
-      // Return slots to the frontend
       return res.json({
         action: "slots",
         message: "Choose a time:",
@@ -325,7 +326,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // Regular reply (no function call)
     return res.json({ action: "reply", message: msg.content });
 
   } catch (err) {
