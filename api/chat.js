@@ -68,7 +68,7 @@ const onboardingSystemPrompt = {
 Collect the following required details **one at a time**. Ask for each field individually, waiting for the response before moving to the next.
 
 Required fields:
-- primary_work_location (e.g., home office, Chicago, Boston, etc.)
+- primary_work_location (The name of your organization)
 - team_member_name
 - phone
 - system_name
