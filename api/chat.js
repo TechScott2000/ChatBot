@@ -31,7 +31,6 @@ const SUPER_OPS_ACCESS_TOKEN = process.env.SUPEROPS_ACCESS_TOKEN;
 const ONBOARDING_CLIENT_ID = "YOUR_ACTUAL_CLIENT_ID"; // Replace with your client ID
 
 // ======================= System Prompts =======================
-// Router prompt – used when no flow has been chosen yet
 const routerSystemPrompt = {
   role: "system",
   content: `You are a friendly Tech Johnny assistant. The user can either:
@@ -366,8 +365,7 @@ export default async function handler(req, res) {
         const completion = await openai.chat.completions.create({
           model: "gpt-4.1-mini",
           messages: [routerSystemPrompt, ...messages],
-          functions: [],
-          function_call: "none",
+          // No functions or function_call parameters
         });
         const reply = completion.choices[0].message.content;
         return res.json({ action: "reply", message: reply });
