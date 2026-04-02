@@ -7,7 +7,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const CALENDLY_API_BASE = "https://api.calendly.com";
 const CALENDLY_ACCESS_TOKEN = process.env.CALENDLY_ACCESS_TOKEN;
 
-// Map session types to Calendly event type URIs
+// Map session types to Calendly event type URIs (obtained from your account)
 const eventTypeMap = {
   "5min":  "https://api.calendly.com/event_types/2ca6b53a-d972-4b1a-a433-f26bcee8b5da",
   "20min": "https://api.calendly.com/event_types/CHAGLS4CIMH5D4FU",
@@ -16,6 +16,7 @@ const eventTypeMap = {
   "nosub": "https://api.calendly.com/event_types/DEPEABECSGGRWQXT",
 };
 
+// Duration mapping (for reference only)
 const durations = {
   "5min": 5,
   "20min": 20,
@@ -26,8 +27,14 @@ const durations = {
 
 const TIMEZONE = "America/Belize";
 
-// ======================= System Prompt =======================
-const systemPrompt = {
+// ======================= SuperOps Configuration =======================
+const SUPER_OPS_API_URL = "https://api.superops.ai/msp";
+const SUPER_OPS_ACCESS_TOKEN = process.env.SUPEROPS_ACCESS_TOKEN;
+// Replace with the actual client accountId where onboarding tickets should be created
+const ONBOARDING_CLIENT_ID = "YOUR_ACTUAL_CLIENT_ID";
+
+// ======================= System Prompts =======================
+const supportSystemPrompt = {
   role: "system",
   content: `You are a friendly and thorough Tech Johnny support assistant. Your goal is to gather comprehensive information to help resolve the user's issue and schedule a support session if needed.
 
@@ -48,7 +55,46 @@ For the issue description, ask **only one question** (e.g., “Please describe t
 Once you have collected all required fields, call the submit_support_request function with the details. Make sure the issue_description field contains all the information you gathered.`,
 };
 
-const functions = [{
+const onboardingSystemPrompt = {
+  role: "system",
+  content: `You are a friendly and thorough Tech Johnny onboarding assistant. Your goal is to collect all necessary workstation and environment details for a new user.
+
+Collect the following required details **one at a time**. Ask for each field individually, waiting for the response before moving to the next.
+
+Required fields:
+- primary_work_location (choose: home office, Chicago, or Boston)
+- team_member_name
+- phone
+- system_name
+- email
+- os_version
+- bitlocker_status
+- office_license
+- pc_azure_local
+- connected_printers
+- number_of_monitors
+- adobe_acrobat
+- docking_station_model
+- printer_installed
+- physical_damage
+- cell_phone_number
+- tablet_home_monitors
+- wireless_keyboard_mouse
+- current_isp
+- google_workspace
+- slack_admin
+- microsoft_login
+- smart_wifi_admin
+- adobe_creative_cloud_admin
+- office_wifi_password_ssid
+- isp_name
+- isp_modem_wifi_network
+- pc_connection_type
+
+Once you have collected all fields, call the submit_onboarding_request function with the complete details.`,
+};
+
+const supportFunctions = [{
   name: "submit_support_request",
   parameters: {
     type: "object",
@@ -66,8 +112,53 @@ const functions = [{
   }
 }];
 
-// ======================= Calendly Helper Functions =======================
+const onboardingFunctions = [{
+  name: "submit_onboarding_request",
+  parameters: {
+    type: "object",
+    properties: {
+      primary_work_location: { type: "string" },
+      team_member_name: { type: "string" },
+      phone: { type: "string" },
+      system_name: { type: "string" },
+      email: { type: "string" },
+      os_version: { type: "string" },
+      bitlocker_status: { type: "string" },
+      office_license: { type: "string" },
+      pc_azure_local: { type: "string" },
+      connected_printers: { type: "string" },
+      number_of_monitors: { type: "string" },
+      adobe_acrobat: { type: "string" },
+      docking_station_model: { type: "string" },
+      printer_installed: { type: "string" },
+      physical_damage: { type: "string" },
+      cell_phone_number: { type: "string" },
+      tablet_home_monitors: { type: "string" },
+      wireless_keyboard_mouse: { type: "string" },
+      current_isp: { type: "string" },
+      google_workspace: { type: "string" },
+      slack_admin: { type: "string" },
+      microsoft_login: { type: "string" },
+      smart_wifi_admin: { type: "string" },
+      adobe_creative_cloud_admin: { type: "string" },
+      office_wifi_password_ssid: { type: "string" },
+      isp_name: { type: "string" },
+      isp_modem_wifi_network: { type: "string" },
+      pc_connection_type: { type: "string" }
+    },
+    required: [
+      "primary_work_location", "team_member_name", "phone", "system_name", "email",
+      "os_version", "bitlocker_status", "office_license", "pc_azure_local",
+      "connected_printers", "number_of_monitors", "adobe_acrobat", "docking_station_model",
+      "printer_installed", "physical_damage", "cell_phone_number", "tablet_home_monitors",
+      "wireless_keyboard_mouse", "current_isp", "google_workspace", "slack_admin",
+      "microsoft_login", "smart_wifi_admin", "adobe_creative_cloud_admin",
+      "office_wifi_password_ssid", "isp_name", "isp_modem_wifi_network", "pc_connection_type"
+    ]
+  }
+}];
 
+// ======================= Calendly Helper Functions =======================
 async function getCalendlySlots(eventTypeUri, startTime, endTime) {
   try {
     const startIso = startTime.toUTC().toISO();
@@ -110,18 +201,10 @@ function buildCustomAnswers(sessionType, userData) {
       });
     }
   } else {
-    if (company) {
-      answers.push({ question: "Company Name", answer: company });
-    }
-    if (property) {
-      answers.push({ question: "Property/Location Name", answer: property });
-    }
-    if (issue_description) {
-      answers.push({ question: "Description of issue", answer: issue_description });
-    }
-    if (phone_number) {
-      answers.push({ question: "Phone Number you will be calling us from at your session time?", answer: phone_number });
-    }
+    if (company) answers.push({ question: "Company Name", answer: company });
+    if (property) answers.push({ question: "Property/Location Name", answer: property });
+    if (issue_description) answers.push({ question: "Description of issue", answer: issue_description });
+    if (phone_number) answers.push({ question: "Phone Number you will be calling us from at your session time?", answer: phone_number });
     if (restarted_computer) {
       const restartOption = restarted_computer.toLowerCase() === "yes"
         ? "Yes, i am ready for Tech Johhny"
@@ -133,14 +216,12 @@ function buildCustomAnswers(sessionType, userData) {
 }
 
 async function bookCalendlyEvent(eventTypeUri, startTime, invitee, customAnswers, sessionType) {
-  // Build questions_and_answers with position
   const questionsAndAnswers = customAnswers.map((qa, index) => ({
     question: qa.question,
     answer: qa.answer,
     position: index,
   }));
 
-  // Determine location based on session type
   let location = null;
   if (sessionType === "nosub") {
     location = { kind: "inbound_call", phone_number: "+1 248-905-1529" };
@@ -160,22 +241,16 @@ async function bookCalendlyEvent(eventTypeUri, startTime, invitee, customAnswers
     ...(location && { location }),
   };
 
-  // Add text_reminder_number only if the phone number is in a valid E.164 format
+  // Format phone number for text reminders if present
   if (invitee.phone) {
     let phone = invitee.phone.trim();
-    // Remove any non-digit characters
     const digitsOnly = phone.replace(/\D/g, '');
     if (phone.startsWith('+')) {
-      // Already has country code, assume correct
       payload.invitee.text_reminder_number = phone;
     } else if (digitsOnly.length === 10) {
-      // Assume US/Canada number, add +1
       payload.invitee.text_reminder_number = `+1${digitsOnly}`;
-      console.log(`Formatted phone number: ${phone} -> ${payload.invitee.text_reminder_number}`);
     } else if (digitsOnly.length === 7) {
-      // Belize number (7 digits), add +501
       payload.invitee.text_reminder_number = `+501${digitsOnly}`;
-      console.log(`Formatted Belize phone number: ${phone} -> ${payload.invitee.text_reminder_number}`);
     } else {
       console.warn(`Could not format phone number: ${phone} – omitting text_reminder_number`);
     }
@@ -194,10 +269,57 @@ async function bookCalendlyEvent(eventTypeUri, startTime, invitee, customAnswers
 
   if (!response.ok) {
     const errorBody = await response.text();
-    console.error("❌ Calendly booking error response:", errorBody);
     throw new Error(`Calendly booking failed (${response.status}): ${errorBody}`);
   }
   return response.json();
+}
+
+// ======================= SuperOps Helper Function =======================
+async function createSuperOpsTicket(onboardingData) {
+  // Build a readable description from all fields
+  let description = "Onboarding Request Details:\n\n";
+  for (const [key, value] of Object.entries(onboardingData)) {
+    if (value && value !== "null" && value !== "undefined") {
+      description += `${key.replace(/_/g, ' ').toUpperCase()}: ${value}\n`;
+    }
+  }
+
+  const mutation = `
+    mutation CreateTicket($input: CreateTicketInput!) {
+      createTicket(input: $input) {
+        ticketId
+        displayId
+        subject
+        status
+      }
+    }
+  `;
+
+  const variables = {
+    input: {
+      subject: `Onboarding Request - ${onboardingData.team_member_name || "New User"}`,
+      description: description,
+      source: "FORM",
+      status: "New",
+      client: { accountId: ONBOARDING_CLIENT_ID },
+    }
+  };
+
+  const response = await fetch(SUPER_OPS_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${SUPER_OPS_ACCESS_TOKEN}`,
+    },
+    body: JSON.stringify({ query: mutation, variables }),
+  });
+
+  const result = await response.json();
+  if (result.errors) {
+    console.error("SuperOps mutation errors:", result.errors);
+    throw new Error(result.errors[0].message);
+  }
+  return result.data.createTicket;
 }
 
 // ======================= Main Next.js API Handler =======================
@@ -215,8 +337,74 @@ export default async function handler(req, res) {
 
   console.log("Incoming request body:", req.body);
 
+  // Determine flow based on intent or first message
+  let flow = "support";
+  const { intent, messages } = req.body;
+  if (intent === "onboard") flow = "onboard";
+  else if (intent === "support") flow = "support";
+  else if (messages && messages.length > 0 && messages[0]?.role === "user") {
+    const firstMsg = messages[0].content.toLowerCase();
+    if (firstMsg === "onboard") flow = "onboard";
+    else if (firstMsg === "support") flow = "support";
+  }
+
+  // ======================= ONBOARDING FLOW =======================
+  if (flow === "onboard") {
+    try {
+      if (!messages || !Array.isArray(messages)) {
+        return res.json({ action: "reply", message: "Invalid messages format." });
+      }
+
+      let completion;
+      try {
+        completion = await openai.chat.completions.create({
+          model: "gpt-4.1-mini",
+          messages: [onboardingSystemPrompt, ...messages],
+          functions: onboardingFunctions,
+          function_call: "auto",
+        });
+      } catch (err) {
+        console.error("OpenAI Completion Error:", err);
+        return res.json({ action: "reply", message: "Error reaching OpenAI. Try again." });
+      }
+
+      const msg = completion.choices[0].message;
+
+      if (msg.function_call && msg.function_call.name === "submit_onboarding_request") {
+        let args = {};
+        try {
+          args = JSON.parse(msg.function_call.arguments);
+        } catch (err) {
+          console.error("Function call args parse error:", err);
+        }
+
+        try {
+          const ticket = await createSuperOpsTicket(args);
+          console.log("✅ Ticket created:", ticket);
+          return res.json({
+            action: "reply",
+            message: `Thank you! An onboarding ticket (${ticket.displayId}) has been created. Our team will review it and reach out if needed.`,
+          });
+        } catch (err) {
+          console.error("Failed to create SuperOps ticket:", err);
+          return res.json({
+            action: "reply",
+            message: "We received your information, but there was an issue creating the ticket. Our team has been notified. Please contact support if you don't hear back soon.",
+          });
+        }
+      }
+
+      // Regular reply
+      return res.json({ action: "reply", message: msg.content });
+    } catch (err) {
+      console.error("Unexpected onboarding error:", err);
+      return res.json({ action: "reply", message: "Something went wrong during onboarding. Please try again." });
+    }
+  }
+
+  // ======================= SUPPORT FLOW =======================
   try {
-    // ----------------------- BOOKING ACTION -----------------------
+    // Handle booking action (if sent by frontend)
     if (req.body.action === "book") {
       const { selectedTime, userData, fileLink } = req.body;
       if (!selectedTime || !userData) {
@@ -229,7 +417,7 @@ export default async function handler(req, res) {
         return res.json({ action: "reply", message: "Invalid session type." });
       }
 
-      // Ensure selectedTime is in UTC ISO format
+      // Convert selected time to UTC ISO if needed
       let startTimeUtc = selectedTime;
       if (!selectedTime.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[-+]\d{2}:\d{2})/)) {
         const local = DateTime.fromFormat(selectedTime, "M/d/yyyy, h:mm:ss a", { zone: TIMEZONE });
@@ -250,6 +438,7 @@ export default async function handler(req, res) {
 
       let customAnswers = buildCustomAnswers(sessionType, userData);
 
+      // Append file link if present
       if (fileLink && customAnswers.some(a => a.question === "Description of issue" || a.question === "Please share anything that will help prepare for our meeting.")) {
         const descAnswer = customAnswers.find(a => a.question === "Description of issue" || a.question === "Please share anything that will help prepare for our meeting.");
         if (descAnswer) {
@@ -271,8 +460,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // ----------------------- CHAT FLOW -----------------------
-    const { messages } = req.body;
+    // Chat flow (no booking action)
     if (!messages || !Array.isArray(messages)) {
       return res.json({ action: "reply", message: "Invalid messages format." });
     }
@@ -281,8 +469,8 @@ export default async function handler(req, res) {
     try {
       completion = await openai.chat.completions.create({
         model: "gpt-4.1-mini",
-        messages: [systemPrompt, ...messages],
-        functions,
+        messages: [supportSystemPrompt, ...messages],
+        functions: supportFunctions,
         function_call: "auto",
       });
     } catch (err) {
@@ -327,9 +515,8 @@ export default async function handler(req, res) {
     }
 
     return res.json({ action: "reply", message: msg.content });
-
   } catch (err) {
-    console.error("Unexpected handler error:", err);
+    console.error("Unexpected support flow error:", err);
     return res.json({ action: "reply", message: "Something went wrong. Please try again." });
   }
 }
