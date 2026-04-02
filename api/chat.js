@@ -7,6 +7,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const CALENDLY_API_BASE = "https://api.calendly.com";
 const CALENDLY_ACCESS_TOKEN = process.env.CALENDLY_ACCESS_TOKEN;
 
+// Map session types to Calendly event type URIs
 const eventTypeMap = {
   "5min":  "https://api.calendly.com/event_types/2ca6b53a-d972-4b1a-a433-f26bcee8b5da",
   "20min": "https://api.calendly.com/event_types/CHAGLS4CIMH5D4FU",
@@ -25,74 +26,29 @@ const durations = {
 
 const TIMEZONE = "America/Belize";
 
-// ======================= SuperOps Configuration =======================
-const SUPER_OPS_API_URL = "https://api.superops.ai/msp";
-const SUPER_OPS_ACCESS_TOKEN = process.env.SUPEROPS_ACCESS_TOKEN;
-const ONBOARDING_CLIENT_ID = "YOUR_ACTUAL_CLIENT_ID"; // Replace with your client ID
-
-// ======================= System Prompts =======================
-const routerSystemPrompt = {
+// ======================= System Prompt =======================
+const systemPrompt = {
   role: "system",
-  content: `You are a Tech Johnny assistant. The user must choose either "onboard" or "support". Ask them to type one of these two words. Do not ask for any other information or provide extra options. Keep your response short.`
+  content: `You are a friendly and thorough Tech Johnny support assistant. Your goal is to gather comprehensive information to help resolve the user's issue and schedule a support session if needed.
+
+Collect the following required details:
+- Name
+- Email
+- Company
+- Property (location or property name)
+- Issue description (ask once; request a concise summary: what's happening, any error messages, steps already taken)
+- Phone number
+- Restarted computer (Yes/No; if no, encourage them to restart before the call)
+- Session type (choose from: 5min, 20min, 40min, 60min, nosub). Explain the options if needed.
+
+Ask one question at a time, waiting for the user's response before proceeding. Be conversational and helpful.
+
+For the issue description, ask **only one question** (e.g., “Please describe the issue in a few sentences – include what’s happening, any error messages, and what you’ve already tried.”). Do not ask for more details after that.
+
+Once you have collected all required fields, call the submit_support_request function with the details. Make sure the issue_description field contains all the information you gathered.`,
 };
 
-const supportSystemPrompt = {
-  role: "system",
-  content: `You are a Tech Johnny support assistant. You must collect the following 8 pieces of information **one at a time**:
-1. Name
-2. Email
-3. Company
-4. Property (location or property name)
-5. Issue description (ask once; ask for a concise summary including what happened, error messages, and steps taken)
-6. Phone number
-7. Restarted computer (Yes/No; if No, encourage restart before the call)
-8. Session type (5min, 20min, 40min, 60min, nosub)
-
-Do not ask for any additional information beyond these 8 items.
-
-After you have collected all 8 details, **immediately call** the function submit_support_request with the collected data. Do not add any commentary, do not schedule anything yourself, and do not offer fake times. The system will handle the rest.
-
-If a user asks to schedule without providing all details, continue asking for missing details. Never invent data.`
-};
-
-const onboardingSystemPrompt = {
-  role: "system",
-  content: `You are a Tech Johnny onboarding assistant. You must collect the following 28 workstation details **one at a time**:
-- primary_work_location
-- team_member_name
-- phone
-- system_name
-- email
-- os_version
-- bitlocker_status
-- office_license
-- pc_azure_local
-- connected_printers
-- number_of_monitors
-- adobe_acrobat
-- docking_station_model
-- printer_installed
-- physical_damage
-- cell_phone_number
-- tablet_home_monitors
-- wireless_keyboard_mouse
-- current_isp
-- google_workspace
-- slack_admin
-- microsoft_login
-- smart_wifi_admin
-- adobe_creative_cloud_admin
-- office_wifi_password_ssid
-- isp_name
-- isp_modem_wifi_network
-- pc_connection_type
-
-Ask for each field individually, waiting for the user's response before moving to the next. Do not skip any field.
-
-After you have collected all 28 details, **immediately call** the function submit_onboarding_request with the collected data. Do not add any summary, do not invent a reference number, and do not offer to proceed with setup. The system will create a ticket.`
-};
-
-const supportFunctions = [{
+const functions = [{
   name: "submit_support_request",
   parameters: {
     type: "object",
@@ -110,72 +66,24 @@ const supportFunctions = [{
   }
 }];
 
-const onboardingFunctions = [{
-  name: "submit_onboarding_request",
-  parameters: {
-    type: "object",
-    properties: {
-      primary_work_location: { type: "string" },
-      team_member_name: { type: "string" },
-      phone: { type: "string" },
-      system_name: { type: "string" },
-      email: { type: "string" },
-      os_version: { type: "string" },
-      bitlocker_status: { type: "string" },
-      office_license: { type: "string" },
-      pc_azure_local: { type: "string" },
-      connected_printers: { type: "string" },
-      number_of_monitors: { type: "string" },
-      adobe_acrobat: { type: "string" },
-      docking_station_model: { type: "string" },
-      printer_installed: { type: "string" },
-      physical_damage: { type: "string" },
-      cell_phone_number: { type: "string" },
-      tablet_home_monitors: { type: "string" },
-      wireless_keyboard_mouse: { type: "string" },
-      current_isp: { type: "string" },
-      google_workspace: { type: "string" },
-      slack_admin: { type: "string" },
-      microsoft_login: { type: "string" },
-      smart_wifi_admin: { type: "string" },
-      adobe_creative_cloud_admin: { type: "string" },
-      office_wifi_password_ssid: { type: "string" },
-      isp_name: { type: "string" },
-      isp_modem_wifi_network: { type: "string" },
-      pc_connection_type: { type: "string" }
-    },
-    required: [
-      "primary_work_location", "team_member_name", "phone", "system_name", "email",
-      "os_version", "bitlocker_status", "office_license", "pc_azure_local",
-      "connected_printers", "number_of_monitors", "adobe_acrobat", "docking_station_model",
-      "printer_installed", "physical_damage", "cell_phone_number", "tablet_home_monitors",
-      "wireless_keyboard_mouse", "current_isp", "google_workspace", "slack_admin",
-      "microsoft_login", "smart_wifi_admin", "adobe_creative_cloud_admin",
-      "office_wifi_password_ssid", "isp_name", "isp_modem_wifi_network", "pc_connection_type"
-    ]
-  }
-}];
-
 // ======================= Calendly Helper Functions =======================
+
 async function getCalendlySlots(eventTypeUri, startTime, endTime) {
   try {
     const startIso = startTime.toUTC().toISO();
     const endIso = endTime.toUTC().toISO();
     const url = `${CALENDLY_API_BASE}/event_type_available_times?event_type=${encodeURIComponent(eventTypeUri)}&start_time=${startIso}&end_time=${endIso}`;
-
     const response = await fetch(url, {
       headers: {
         Authorization: `Bearer ${CALENDLY_ACCESS_TOKEN}`,
         "Content-Type": "application/json",
       },
     });
-
     if (!response.ok) {
       const errorText = await response.text();
       console.error("Calendly availability error:", response.status, errorText);
       return null;
     }
-
     const data = await response.json();
     return data.collection.map(slot => slot.start_time);
   } catch (err) {
@@ -202,10 +110,18 @@ function buildCustomAnswers(sessionType, userData) {
       });
     }
   } else {
-    if (company) answers.push({ question: "Company Name", answer: company });
-    if (property) answers.push({ question: "Property/Location Name", answer: property });
-    if (issue_description) answers.push({ question: "Description of issue", answer: issue_description });
-    if (phone_number) answers.push({ question: "Phone Number you will be calling us from at your session time?", answer: phone_number });
+    if (company) {
+      answers.push({ question: "Company Name", answer: company });
+    }
+    if (property) {
+      answers.push({ question: "Property/Location Name", answer: property });
+    }
+    if (issue_description) {
+      answers.push({ question: "Description of issue", answer: issue_description });
+    }
+    if (phone_number) {
+      answers.push({ question: "Phone Number you will be calling us from at your session time?", answer: phone_number });
+    }
     if (restarted_computer) {
       const restartOption = restarted_computer.toLowerCase() === "yes"
         ? "Yes, i am ready for Tech Johhny"
@@ -217,12 +133,14 @@ function buildCustomAnswers(sessionType, userData) {
 }
 
 async function bookCalendlyEvent(eventTypeUri, startTime, invitee, customAnswers, sessionType) {
+  // Build questions_and_answers with position
   const questionsAndAnswers = customAnswers.map((qa, index) => ({
     question: qa.question,
     answer: qa.answer,
     position: index,
   }));
 
+  // Determine location based on session type
   let location = null;
   if (sessionType === "nosub") {
     location = { kind: "inbound_call", phone_number: "+1 248-905-1529" };
@@ -242,15 +160,22 @@ async function bookCalendlyEvent(eventTypeUri, startTime, invitee, customAnswers
     ...(location && { location }),
   };
 
+  // Add text_reminder_number only if the phone number is in a valid E.164 format
   if (invitee.phone) {
     let phone = invitee.phone.trim();
+    // Remove any non-digit characters
     const digitsOnly = phone.replace(/\D/g, '');
     if (phone.startsWith('+')) {
+      // Already has country code, assume correct
       payload.invitee.text_reminder_number = phone;
     } else if (digitsOnly.length === 10) {
+      // Assume US/Canada number, add +1
       payload.invitee.text_reminder_number = `+1${digitsOnly}`;
+      console.log(`Formatted phone number: ${phone} -> ${payload.invitee.text_reminder_number}`);
     } else if (digitsOnly.length === 7) {
+      // Belize number (7 digits), add +501
       payload.invitee.text_reminder_number = `+501${digitsOnly}`;
+      console.log(`Formatted Belize phone number: ${phone} -> ${payload.invitee.text_reminder_number}`);
     } else {
       console.warn(`Could not format phone number: ${phone} – omitting text_reminder_number`);
     }
@@ -269,61 +194,13 @@ async function bookCalendlyEvent(eventTypeUri, startTime, invitee, customAnswers
 
   if (!response.ok) {
     const errorBody = await response.text();
+    console.error("❌ Calendly booking error response:", errorBody);
     throw new Error(`Calendly booking failed (${response.status}): ${errorBody}`);
   }
-
   return response.json();
 }
 
-// ======================= SuperOps Helper Function =======================
-async function createSuperOpsTicket(onboardingData) {
-  let description = "Onboarding Request Details:\n\n";
-  for (const [key, value] of Object.entries(onboardingData)) {
-    if (value && value !== "null" && value !== "undefined") {
-      description += `${key.replace(/_/g, ' ').toUpperCase()}: ${value}\n`;
-    }
-  }
-
-  const mutation = `
-    mutation CreateTicket($input: CreateTicketInput!) {
-      createTicket(input: $input) {
-        ticketId
-        displayId
-        subject
-        status
-      }
-    }
-  `;
-
-  const variables = {
-    input: {
-      subject: `Onboarding Request - ${onboardingData.team_member_name || "New User"}`,
-      description: description,
-      source: "FORM",
-      status: "New",
-      client: { accountId: ONBOARDING_CLIENT_ID },
-    }
-  };
-
-  const response = await fetch(SUPER_OPS_API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${SUPER_OPS_ACCESS_TOKEN}`,
-    },
-    body: JSON.stringify({ query: mutation, variables }),
-  });
-
-  const result = await response.json();
-  if (result.errors) {
-    console.error("SuperOps mutation errors:", result.errors);
-    throw new Error(result.errors[0].message);
-  }
-
-  return result.data.createTicket;
-}
-
-// ======================= MAIN HANDLER =======================
+// ======================= Main Next.js API Handler =======================
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -333,72 +210,37 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   if (!req.body || typeof req.body !== "object") {
-    return res.status(400).json({ action: "reply", message: "Invalid request body" });
+    return res.status(400).json({ action: "reply", message: "Invalid request. Please send a valid JSON body." });
   }
 
-  let { intent, messages } = req.body;
+  console.log("Incoming request body:", req.body);
 
-  if (!intent && messages?.length) {
-    const lastUserMsg = [...messages].reverse().find(m => m.role === "user");
-    if (lastUserMsg) {
-      const lower = lastUserMsg.content.trim().toLowerCase(); // FIX: trim safety
-      if (lower === "onboard" || lower === "support") {
-        intent = lower;
-      }
-    }
-  }
-
-  // ================= ROUTER =================
-  if (!intent) {
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
-      messages: [routerSystemPrompt, ...messages],
-    });
-
-    return res.json({
-      action: "reply",
-      message: completion.choices[0].message.content,
-    });
-  }
-
-  // ================= ONBOARD =================
-  if (intent === "onboard") {
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
-      messages: [onboardingSystemPrompt, ...messages],
-      functions: onboardingFunctions,
-      function_call: "auto",
-    });
-
-    const msg = completion.choices[0].message;
-
-    if (msg.function_call?.name === "submit_onboarding_request") {
-      let args = {};
-      try {
-        args = JSON.parse(msg.function_call.arguments);
-      } catch (e) {
-        console.error("Parse error:", e);
-      }
-
-      const ticket = await createSuperOpsTicket(args);
-
-      return res.json({
-        action: "reply",
-        message: `Onboarding ticket created: ${ticket?.displayId || "SUCCESS"}`
-      });
-    }
-
-    return res.json({ action: "reply", message: msg.content });
-  }
-
-  // ================= SUPPORT =================
   try {
+    // ----------------------- BOOKING ACTION -----------------------
     if (req.body.action === "book") {
       const { selectedTime, userData, fileLink } = req.body;
+      if (!selectedTime || !userData) {
+        return res.json({ action: "reply", message: "Invalid booking data." });
+      }
 
-      const eventTypeUri = eventTypeMap[userData.session_type];
+      const sessionType = userData.session_type;
+      const eventTypeUri = eventTypeMap[sessionType];
+      if (!eventTypeUri) {
+        return res.json({ action: "reply", message: "Invalid session type." });
+      }
 
+      // Ensure selectedTime is in UTC ISO format
       let startTimeUtc = selectedTime;
+      if (!selectedTime.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[-+]\d{2}:\d{2})/)) {
+        const local = DateTime.fromFormat(selectedTime, "M/d/yyyy, h:mm:ss a", { zone: TIMEZONE });
+        if (local.isValid) {
+          startTimeUtc = local.toUTC().toISO();
+          console.log(`Converted local time "${selectedTime}" to UTC: ${startTimeUtc}`);
+        } else {
+          console.error(`Invalid time format: ${selectedTime}`);
+          return res.json({ action: "reply", message: "Invalid time format. Please select a time again." });
+        }
+      }
 
       const invitee = {
         name: userData.name,
@@ -406,53 +248,80 @@ export default async function handler(req, res) {
         phone: userData.phone_number,
       };
 
-      const customAnswers = buildCustomAnswers(userData.session_type, userData);
+      let customAnswers = buildCustomAnswers(sessionType, userData);
 
-      if (fileLink) {
-        const desc = customAnswers.find(a =>
-          a.question.includes("Description") || a.question.includes("prepare")
-        );
-        if (desc) desc.answer += `\n\nAttachment: ${fileLink}`;
+      if (fileLink && customAnswers.some(a => a.question === "Description of issue" || a.question === "Please share anything that will help prepare for our meeting.")) {
+        const descAnswer = customAnswers.find(a => a.question === "Description of issue" || a.question === "Please share anything that will help prepare for our meeting.");
+        if (descAnswer) {
+          descAnswer.answer += `\n\nAttached image: ${fileLink}`;
+        }
       }
 
-      const booking = await bookCalendlyEvent(
-        eventTypeUri,
-        startTimeUtc,
-        invitee,
-        customAnswers,
-        userData.session_type
-      );
-
-      return res.json({
-        action: "link",
-        url: booking.resource?.uri,
-      });
+      try {
+        const booking = await bookCalendlyEvent(eventTypeUri, startTimeUtc, invitee, customAnswers, sessionType);
+        const inviteeUri = booking.resource?.uri;
+        return res.json({
+          action: "link",
+          message: "Booked successfully! You will receive a confirmation email and SMS shortly.",
+          url: inviteeUri,
+        });
+      } catch (err) {
+        console.error("Calendly booking error:", err);
+        return res.json({ action: "reply", message: "Booking failed. Please try another time or contact support." });
+      }
     }
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
-      messages: [supportSystemPrompt, ...messages],
-      functions: supportFunctions,
-      function_call: "auto",
-    });
+    // ----------------------- CHAT FLOW -----------------------
+    const { messages } = req.body;
+    if (!messages || !Array.isArray(messages)) {
+      return res.json({ action: "reply", message: "Invalid messages format." });
+    }
+
+    let completion;
+    try {
+      completion = await openai.chat.completions.create({
+        model: "gpt-4.1-mini",
+        messages: [systemPrompt, ...messages],
+        functions,
+        function_call: "auto",
+      });
+    } catch (err) {
+      console.error("OpenAI Completion Error:", err);
+      return res.json({ action: "reply", message: "Error reaching OpenAI. Try again." });
+    }
 
     const msg = completion.choices[0].message;
 
-    if (msg.function_call?.name === "submit_support_request") {
-      const args = JSON.parse(msg.function_call.arguments || "{}");
+    if (msg.function_call) {
+      let args = {};
+      try {
+        args = JSON.parse(msg.function_call.arguments);
+      } catch (err) {
+        console.error("Function call args parse error:", err);
+      }
 
-      const eventTypeUri = eventTypeMap[args.session_type];
+      const sessionType = args.session_type;
+      const eventTypeUri = eventTypeMap[sessionType];
+      if (!eventTypeUri) {
+        return res.json({ action: "reply", message: "Invalid session type. Please choose from: 5min, 20min, 40min, 60min, nosub." });
+      }
 
       const now = DateTime.now().setZone(TIMEZONE);
       const startTime = now.plus({ minutes: 1 });
       const endTime = now.plus({ days: 7 });
-
       const slots = await getCalendlySlots(eventTypeUri, startTime, endTime);
+
+      if (!slots || slots.length === 0) {
+        return res.json({
+          action: "reply",
+          message: "No available slots in the next 7 days for that session type. Please try another session type or try again later.",
+        });
+      }
 
       return res.json({
         action: "slots",
         message: "Choose a time:",
-        slots: slots?.slice(0, 8) || [],
+        slots: slots.slice(0, 8),
         userData: args,
       });
     }
@@ -460,7 +329,7 @@ export default async function handler(req, res) {
     return res.json({ action: "reply", message: msg.content });
 
   } catch (err) {
-    console.error("Support flow error:", err);
-    return res.json({ action: "reply", message: "Something went wrong." });
+    console.error("Unexpected handler error:", err);
+    return res.json({ action: "reply", message: "Something went wrong. Please try again." });
   }
 }
